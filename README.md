@@ -10,12 +10,19 @@ It combines:
 
 ---
 
-## Quick Start (Windows)
+## Quick Start (Windows 10/11)
+
+Double-click **`install.bat`** (no developer tools or PowerShell policy tweaks needed), or run from PowerShell:
 
 ```powershell
 cd freecad-tutor-mcp
 .\install.ps1
 ```
+
+What the installer does:
+1. Detects your FreeCAD `Mod` folder (including versioned `v1-1\Mod` / `v1-0\Mod`) and installs the `FreeCADTutorMCP` workbench.
+2. Creates a standalone `.venv` using `uv` (automatically bootstrapping `uv` / Python 3.12 if not installed on a clean Windows 11 PC, and ignoring Windows Store `python.exe` stubs).
+3. Backs up and updates `%APPDATA%\Claude\claude_desktop_config.json` in BOM-less UTF-8.
 
 Then:
 1. Launch (or restart) **FreeCAD 1.0 / 1.1+**. The RPC server auto-starts on `127.0.0.1:9876`.
