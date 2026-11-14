@@ -6,7 +6,13 @@ import sys
 import FreeCAD
 import FreeCADGui as Gui
 
-from rpc_server import DEFAULT_HOST, DEFAULT_PORT, PROTOCOL_VERSION, RPCServer
+from rpc_server import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    PROTOCOL_VERSION,
+    RPCServer,
+    get_or_create_auth_token,
+)
 
 _server: RPCServer | None = None
 
@@ -131,8 +137,9 @@ def ensure_started(silent_if_running: bool = False) -> RPCServer | None:
 
     host = os.environ.get("FREECAD_MCP_HOST", DEFAULT_HOST)
     port = int(os.environ.get("FREECAD_MCP_PORT", str(DEFAULT_PORT)))
+    auth_token = get_or_create_auth_token()
 
-    srv = RPCServer(host=host, port=port)
+    srv = RPCServer(host=host, port=port, auth_token=auth_token)
     srv.register_all(_build_handler_map())
     srv.register("reload_handlers", _reload_handlers)
 

@@ -6,11 +6,22 @@ import time
 import pytest
 
 from freecad_tutor_mcp.bridge import FreeCADBridge, RPCError
-from rpc_server import PROTOCOL_VERSION, RPCServer
+from rpc_server import (
+    AUTH_ERROR_CODE,
+    PROTOCOL_VERSION,
+    RPCServer,
+    get_or_create_auth_token,
+)
 
 
-def _start_pumped_server(timeout: float = 2.0):
-    srv = RPCServer(host="127.0.0.1", port=0, use_qt=False, main_thread_timeout=timeout)
+def _start_pumped_server(timeout: float = 2.0, auth_token: str | None = None):
+    srv = RPCServer(
+        host="127.0.0.1",
+        port=0,
+        use_qt=False,
+        main_thread_timeout=timeout,
+        auth_token=auth_token,
+    )
     stop_pump = threading.Event()
 
     def _pump():
@@ -128,3 +139,41 @@ def test_rpc_server_and_json_utils_import_without_freecad(monkeypatch: pytest.Mo
 
     cleaned = sanitize_json({"nan": float("nan"), "inf": float("inf"), "ninf": float("-inf"), "ok": [1, 2.5]})
     assert cleaned == {"nan": None, "inf": None, "ninf": None, "ok": [1, 2.5]}
+
+
+def test_auth_token_enforcement_and_reload(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    token_file = tmp_path / "mcp_auth_token"
+    monkeypatch.setenv("FREECAD_MCP_TOKEN_FILE", str(token_file))
+    monkeypatch.delenv("FREECAD_MCP_TOKEN", raising=False)
+
+    created_token = get_or_create_auth_token()
+    assert token_file.exists()
+    assert get_or_create_auth_token() == created_token
+
+    srv, stop_pump, pump_thread = _start_pumped_server(auth_token=created_token)
+    srv.register("secret_op", lambda: {"allowed": True})
+    try:
+        # Wrong explicit token is rejected with -32003, while unauthenticated ping still works
+        bad_bridge = FreeCADBridge(host="127.0.0.1", port=srv.port, auth_token="wrong-token")
+        ping = bad_bridge.call("ping")
+        assert ping["pong"] is True
+        assert ping["auth_required"] is True
+
+        with pytest.raises(RPCError) as exc_info:
+            bad_bridge.call("secret_op")
+        assert exc_info.value.code == AUTH_ERROR_CODE
+        bad_bridge.disconnect()
+
+        # Bridge without explicit token picks up the file token, and transparently reloads if rotated
+        good_bridge = FreeCADBridge(host="127.0.0.1", port=srv.port)
+        assert good_bridge.call("secret_op") == {"allowed": True}
+
+        new_token = "rotated-token-value"
+        srv.auth_token = new_token
+        token_file.write_text(new_token + "\n", encoding="utf-8")
+        assert good_bridge.call("secret_op") == {"allowed": True}
+        good_bridge.disconnect()
+    finally:
+        stop_pump.set()
+        pump_thread.join(timeout=2)
+        srv.stop()

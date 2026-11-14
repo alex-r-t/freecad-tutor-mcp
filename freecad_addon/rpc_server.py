@@ -8,10 +8,12 @@ Design combines:
   stuck-task fail-fast, and non-GUI health probes (`ping`, `get_rpc_status`).
 """
 
+import hmac
 import json
 import logging
 import os
 import queue
+import secrets
 import socket
 import threading
 import time
@@ -22,7 +24,7 @@ from json_utils import sanitize_json
 
 logger = logging.getLogger("freecad_tutor_mcp.rpc_server")
 
-PROTOCOL_VERSION = "0.1.0"
+PROTOCOL_VERSION = "0.2.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9876
 MSG_DELIMITER = b"\n"
@@ -30,6 +32,65 @@ MAX_MSG_SIZE = 16 * 1024 * 1024
 MAIN_THREAD_TIMEOUT = 60.0
 POLL_INTERVAL_MS = 250
 MOUSE_DEFER_MAX_S = 5.0
+AUTH_ERROR_CODE = -32003
+
+
+def get_token_file_path() -> str:
+    """Return the path where the local TCP RPC shared secret is stored.
+
+    Precedence:
+    1. FREECAD_MCP_TOKEN_FILE environment override (useful in automated tests).
+    2. %APPDATA%\\FreeCAD\\mcp_auth_token on Windows.
+    3. ~/.freecad_mcp_token fallback on POSIX or stripped environments.
+    """
+    override = os.environ.get("FREECAD_MCP_TOKEN_FILE", "").strip()
+    if override:
+        return override
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return os.path.join(appdata, "FreeCAD", "mcp_auth_token")
+    return os.path.join(os.path.expanduser("~"), ".freecad_mcp_token")
+
+
+def read_auth_token() -> str | None:
+    """Read the shared RPC auth token from FREECAD_MCP_TOKEN or the token file."""
+    env_token = os.environ.get("FREECAD_MCP_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    token_path = get_token_file_path()
+    try:
+        with open(token_path, "r", encoding="utf-8") as fh:
+            token = fh.read().strip()
+            return token or None
+    except OSError:
+        return None
+
+
+def get_or_create_auth_token() -> str:
+    """Return the shared local auth token, creating and persisting one if absent.
+
+    FreeCAD generates this secret once on server startup so other unprivileged local
+    processes cannot invoke execute_script or mutate models over 127.0.0.1 without
+    reading the current user's token file.
+    """
+    existing = read_auth_token()
+    if existing:
+        return existing
+
+    token = secrets.token_urlsafe(32)
+    token_path = get_token_file_path()
+    parent = os.path.dirname(token_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(token_path, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+    try:
+        # Restrict permissions where supported (no-op for POSIX bits on Windows ACLs,
+        # where %APPDATA% already inherits user-only NTFS ownership).
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
+    return token
 
 
 def _import_qt():
@@ -103,11 +164,13 @@ class RPCServer:
         *,
         use_qt: bool = True,
         main_thread_timeout: float = MAIN_THREAD_TIMEOUT,
+        auth_token: str | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.use_qt = use_qt
         self.main_thread_timeout = main_thread_timeout
+        self.auth_token = auth_token
 
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._direct_handlers: dict[str, Callable[..., Any]] = {}
@@ -313,6 +376,16 @@ class RPCServer:
         if not isinstance(method, str) or not isinstance(params, dict):
             return self._error_response(req_id, -32600, "Invalid Request: method/params type error")
 
+        # Enforce shared local token on all methods except unauthenticated `ping`.
+        if self.auth_token is not None and method != "ping":
+            provided = req.get("auth_token")
+            if not isinstance(provided, str) or not hmac.compare_digest(provided, self.auth_token):
+                return self._error_response(
+                    req_id,
+                    AUTH_ERROR_CODE,
+                    "Unauthorized: missing or invalid FreeCAD Tutor MCP local auth token.",
+                )
+
         if method in self._direct_handlers:
             try:
                 result = self._direct_handlers[method](**params) if params else self._direct_handlers[method]()
@@ -369,6 +442,7 @@ class RPCServer:
             "pid": os.getpid(),
             "host": self.host,
             "port": self.port,
+            "auth_required": self.auth_token is not None,
         }
 
     def _handle_status(self) -> dict[str, Any]:

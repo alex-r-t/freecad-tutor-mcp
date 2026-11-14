@@ -36,8 +36,13 @@ _COMPACT_PROPERTY_KEYS = (
 )
 
 
-def list_documents() -> list[dict[str, Any]]:
-    """Return a summary of all open FreeCAD documents."""
+def list_documents() -> dict[str, Any]:
+    """Return a consistent dictionary listing all open FreeCAD documents.
+
+    Returning a dictionary wrapper (instead of a bare list) prevents MCP/FastMCP
+    clients from unwrapping single-item lists into a flat document object while
+    returning an empty list when zero documents are open.
+    """
     active_name = FreeCAD.ActiveDocument.Name if FreeCAD.ActiveDocument else None
     documents: list[dict[str, Any]] = []
     for name, doc in FreeCAD.listDocuments().items():
@@ -54,7 +59,11 @@ def list_documents() -> list[dict[str, Any]]:
             "is_active": name == active_name,
             "is_modified": is_modified,
         })
-    return documents
+    return {
+        "active_document": active_name,
+        "count": len(documents),
+        "documents": documents,
+    }
 
 
 def get_document_graph(

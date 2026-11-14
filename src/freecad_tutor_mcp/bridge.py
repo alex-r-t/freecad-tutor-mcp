@@ -14,6 +14,32 @@ MSG_DELIMITER = b"\n"
 RECV_BUFFER = 65536
 CONNECT_TIMEOUT = 5.0
 CALL_TIMEOUT = 120.0
+AUTH_ERROR_CODE = -32003
+
+
+def _default_token_file_path() -> str:
+    """Resolve the shared local RPC token file path matching FreeCAD's addon."""
+    override = os.environ.get("FREECAD_MCP_TOKEN_FILE", "").strip()
+    if override:
+        return override
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return os.path.join(appdata, "FreeCAD", "mcp_auth_token")
+    return os.path.join(os.path.expanduser("~"), ".freecad_mcp_token")
+
+
+def read_local_auth_token() -> str | None:
+    """Read the shared local RPC token from env var or the user's FreeCAD token file."""
+    env_token = os.environ.get("FREECAD_MCP_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    token_path = _default_token_file_path()
+    try:
+        with open(token_path, "r", encoding="utf-8") as fh:
+            token = fh.read().strip()
+            return token or None
+    except OSError:
+        return None
 
 
 class BridgeError(Exception):
@@ -31,9 +57,16 @@ class RPCError(Exception):
 class FreeCADBridge:
     """Thread-safe TCP JSON-RPC client for FreeCADTutorMCP."""
 
-    def __init__(self, host: str | None = None, port: int | None = None) -> None:
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        auth_token: str | None = None,
+    ) -> None:
         self.host = host or os.environ.get("FREECAD_MCP_HOST", DEFAULT_HOST)
         self.port = port or int(os.environ.get("FREECAD_MCP_PORT", str(DEFAULT_PORT)))
+        self._explicit_auth_token = auth_token
+        self._cached_auth_token: str | None = auth_token
         self._socket: socket.socket | None = None
         self._lock = threading.Lock()
         self._request_id = 0
@@ -70,15 +103,36 @@ class FreeCADBridge:
     def version_warning(self) -> str | None:
         return self._version_warning
 
+    def _resolve_auth_token(self, force_reload: bool = False) -> str | None:
+        """Return an explicit token if supplied, otherwise read/cache the local token file."""
+        if self._explicit_auth_token is not None:
+            return self._explicit_auth_token
+        if force_reload or self._cached_auth_token is None:
+            self._cached_auth_token = read_local_auth_token()
+        return self._cached_auth_token
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        """Send a JSON-RPC call, reconnecting once if the socket dropped."""
+        """Send a JSON-RPC call, retrying once on dropped socket or rotated auth token."""
         with self._lock:
+            refreshed_token = False
             for attempt in range(2):
                 try:
                     result = self._do_call(method, params or {})
                     if not self._checked_version and method not in ("ping", "get_rpc_status"):
                         self._check_protocol_version_locked()
                     return result
+                except RPCError as exc:
+                    # If FreeCAD regenerated its local token file after this bridge cached
+                    # an older value, reload the token file once and retry.
+                    if (
+                        exc.code == AUTH_ERROR_CODE
+                        and not refreshed_token
+                        and self._explicit_auth_token is None
+                    ):
+                        refreshed_token = True
+                        self._resolve_auth_token(force_reload=True)
+                        continue
+                    raise
                 except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                     self.disconnect()
                     if attempt == 1:
@@ -108,7 +162,15 @@ class FreeCADBridge:
         self._request_id += 1
         req_id = self._request_id
 
-        payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": req_id}
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": req_id,
+        }
+        token = self._resolve_auth_token()
+        if token:
+            payload["auth_token"] = token
         raw = json.dumps(payload, allow_nan=False).encode("utf-8") + MSG_DELIMITER
         self._socket.sendall(raw)
 

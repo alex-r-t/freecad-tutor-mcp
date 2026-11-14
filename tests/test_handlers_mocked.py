@@ -425,3 +425,28 @@ def test_ui_highlight_toolbar_panel_menu_and_clear(fake_freecad, monkeypatch):
     # 6. Clear flag cleans up
     cleared = ui_highlight.highlight_ui_element(clear=True)
     assert cleared["cleared"] is True
+
+
+def test_list_documents_consistent_dict_shape(fake_freecad):
+    fc, _ = fake_freecad
+    document, _, _, _, _, _, _, _, _ = _reload_handlers()
+
+    # 1 document -> still wrapped in {active_document, count, documents}
+    one = document.list_documents()
+    assert isinstance(one, dict)
+    assert one["count"] == 1
+    assert one["active_document"] == "CoursePart"
+    assert len(one["documents"]) == 1
+
+    # 2 documents
+    fc.newDocument("TutorDemo")
+    two = document.list_documents()
+    assert two["count"] == 2
+    assert two["active_document"] == "TutorDemo"
+    assert len(two["documents"]) == 2
+
+    # 0 documents
+    fc.listDocuments = lambda: {}
+    fc.ActiveDocument = None
+    zero = document.list_documents()
+    assert zero == {"active_document": None, "count": 0, "documents": []}

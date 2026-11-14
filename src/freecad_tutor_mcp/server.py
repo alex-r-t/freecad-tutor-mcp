@@ -22,10 +22,11 @@ logger = logging.getLogger("freecad_tutor_mcp.server")
 SERVER_INSTRUCTIONS = """You are connected to a live FreeCAD 1.0/1.1+ instance via FreeCAD Tutor MCP.
 
 Workflow rules:
-1. Inspect before acting: use `get_document_graph`, `get_sketch_diagnostics`, `get_selection`, and `get_console_output` to observe the student's real model state.
-2. Never guess FreeCAD menu or toolbar locations: call `find_ui_command` to get exact live menu paths, shortcuts, and why a button might be greyed out, and use `highlight_ui_element` to put a temporary spotlight on the button, menu, or panel in the live FreeCAD window.
-3. Do not mutate the student's active coursework file unless explicitly asked; prefer `create_document(name="Tutor_Demo")` for demonstrations.
-4. All editing tools are wrapped in FreeCAD undo transactions (`Ctrl+Z` / `undo`)."""
+1. Inspect before acting: use `get_document_graph`, `get_sketch_diagnostics`, `get_selection`, `get_recent_activity`, and `get_console_output` to observe the student's real model state.
+2. Search for specialized tools before scripting: Claude Desktop may defer some tools behind tool search. Before falling back to `execute_script`, search for and load matching 1-to-1 tools (`partdesign_*`, `find_edges`, `find_faces`, `measure_distance`, `set_view`, `save_document`/`open_document`/`close_document`/`export_document`, `set_property`, `set_appearance`, `create_datum_plane`, `create_varset`, `add_techdraw_*`, `export_techdraw_page`, `explain_freecad_error`).
+3. Never guess FreeCAD menu or toolbar locations: call `find_ui_command` to get exact live menu paths, shortcuts, and why a button might be greyed out, and use `highlight_ui_element` to put a temporary spotlight on the button, menu, or panel in the live FreeCAD window.
+4. Do not mutate the student's active coursework file unless explicitly asked; prefer `create_document(name="Tutor_Demo")` for demonstrations, and never discard unsaved changes without consent.
+5. All editing tools are wrapped in FreeCAD undo transactions (`Ctrl+Z` / `undo`)."""
 
 # Read-only tools run smoothly without confirmation prompts in Claude Desktop.
 READ_ONLY = ToolAnnotations(
@@ -66,8 +67,8 @@ def create_server(bridge: FreeCADBridge | None = None) -> MCPServer:
         return status
 
     @mcp.tool(annotations=READ_ONLY)
-    def list_documents() -> list[dict[str, Any]]:
-        """List all open FreeCAD documents with names, paths, active flag, and object counts."""
+    def list_documents() -> dict[str, Any]:
+        """List all open FreeCAD documents (`active_document`, `count`, and `documents` list)."""
         return _call("list_documents")
 
     @mcp.tool(annotations=READ_ONLY)

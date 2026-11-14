@@ -118,7 +118,14 @@ def test_get_view_returns_image_and_version_warning():
 def test_stdio_entrypoint_end_to_end():
     """Spawn the installed freecad-tutor-mcp.exe over stdio connected to a live RPCServer."""
     srv = RPCServer(host="127.0.0.1", port=0, use_qt=False, main_thread_timeout=2.0)
-    srv.register("list_documents", lambda: [{"name": "TutorDemo", "active": True, "object_count": 1}])
+    srv.register(
+        "list_documents",
+        lambda: {
+            "active_document": "TutorDemo",
+            "count": 1,
+            "documents": [{"name": "TutorDemo", "is_active": True, "object_count": 1}],
+        },
+    )
     srv.register(
         "get_view",
         lambda view_name="Current", **_: {
@@ -165,7 +172,9 @@ def test_stdio_entrypoint_end_to_end():
                 assert status_payload["running"] is True
 
                 docs_res = await session.call_tool("list_documents", {})
-                assert "TutorDemo" in docs_res.content[0].text
+                docs_payload = json.loads(docs_res.content[0].text)
+                assert docs_payload["count"] == 1
+                assert docs_payload["documents"][0]["name"] == "TutorDemo"
 
                 view_res = await session.call_tool("get_view", {"view_name": "Isometric"})
                 assert view_res.content[0].type == "image"
