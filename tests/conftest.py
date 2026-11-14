@@ -66,6 +66,12 @@ class FakeObject:
     def getDocumentationOfProperty(self, prop: str) -> str:
         return f"Doc for {prop}"
 
+    def addProperty(self, full_type: str, prop: str, group: str = "Base", doc: str = ""):
+        if prop not in self.PropertiesList:
+            self.PropertiesList.append(prop)
+        setattr(self, prop, None)
+        return self
+
 
 class FakeDocument:
     def __init__(self, name: str = "TestDoc"):

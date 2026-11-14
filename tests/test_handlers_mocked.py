@@ -738,3 +738,183 @@ def test_document_lifecycle_save_open_close_export_and_body_tips(
     opened = document.open_document(str(real_fcstd))
     assert opened["opened"] is True
     assert opened["name"] == "CoursePart"
+
+
+def test_find_edges_faces_measure_and_deep_check(fake_freecad):
+    fc, gui = fake_freecad
+    _, inspection, _, _, _, _, _, _, _ = _reload_handlers()
+
+    doc = fc.ActiveDocument
+    pad = doc.addObject("PartDesign::Pad", "Pad")
+
+    class _FakeSurface:
+        def __init__(self, axis):
+            self.Axis = FakeVector(*axis)
+            self.Position = FakeVector(0, 0, 0)
+
+    class _Plane(_FakeSurface):
+        pass
+
+    _Plane.__name__ = "Plane"
+
+    class _LineCurve:
+        pass
+
+    _LineCurve.__name__ = "Line"
+
+    class _Edge:
+        def __init__(self, p1, p2):
+            self.Vertexes = [types.SimpleNamespace(Point=FakeVector(*p1)), types.SimpleNamespace(Point=FakeVector(*p2))]
+            dx, dy, dz = p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]
+            self.Length = math.sqrt(dx * dx + dy * dy + dz * dz)
+            self.CenterOfMass = FakeVector((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, (p1[2] + p2[2]) / 2)
+            self.Curve = _LineCurve()
+
+    class _Face:
+        def __init__(self, normal, area, com):
+            self.Surface = _Plane(normal)
+            self.Area = area
+            self.CenterOfMass = FakeVector(*com)
+
+    v_edge = _Edge((0, 0, 0), (0, 0, 15))
+    h_edge = _Edge((0, 0, 0), (40, 0, 0))
+    top_face = _Face((0, 0, 1), 800.0, (20, 10, 15))
+    side_face = _Face((1, 0, 0), 150.0, (40, 10, 7.5))
+
+    pad.Shape = types.SimpleNamespace(
+        ShapeType="Solid",
+        isValid=lambda: True,
+        isNull=lambda: False,
+        Solids=[object()],
+        Shells=[object()],
+        Faces=[top_face, side_face],
+        Edges=[v_edge, h_edge],
+        Vertexes=[object()] * 8,
+        Volume=12000.0,
+        Area=1900.0,
+        BoundBox=types.SimpleNamespace(XMin=0, XMax=40, YMin=0, YMax=20, ZMin=0, ZMax=15, XLength=40, YLength=20, ZLength=15),
+        check=lambda bop: (_ for _ in ()).throw(ValueError("BRepCheck_SelfIntersectingWire")) if bop else None,
+        getElement=lambda sub: types.SimpleNamespace(
+            distToShape=lambda other: (15.0, [(FakeVector(0, 0, 0), FakeVector(0, 0, 15))], [])
+        ),
+        distToShape=lambda other: (15.0, [(FakeVector(0, 0, 0), FakeVector(0, 0, 15))], []),
+    )
+
+    z_edges = inspection.find_edges("Pad", direction="Z", length=15.0, select_matches=True)
+    assert z_edges["edge_names"] == ["Edge1"]
+    assert z_edges["selected_in_gui"] is True
+
+    top_faces = inspection.find_faces("Pad", normal="+Z", min_area=500.0)
+    assert top_faces["face_names"] == ["Face1"]
+
+    dist = inspection.measure_distance("Pad", "Face1", "Pad", "Face2")
+    assert dist["min_distance"] == 15.0
+    assert dist["delta"] == [0.0, 0.0, 15.0]
+
+    deep = inspection.analyze_shape("Pad", deep_check=True)
+    assert deep["bop_check_passed"] is False
+    assert deep["error_explanation"]["code"] == "UNKNOWN_FREECAD_ERROR"
+
+
+def test_partdesign_varset_datum_property_and_techdraw(fake_freecad, monkeypatch: pytest.MonkeyPatch, tmp_path):
+    import sys
+
+    fc, gui = fake_freecad
+    _reload_handlers()
+    from handlers import partdesign, techdraw
+
+    importlib.reload(partdesign)
+    importlib.reload(techdraw)
+
+    monkeypatch.setitem(sys.modules, "PartDesign", types.ModuleType("PartDesign"))
+    fake_td_gui = types.ModuleType("TechDrawGui")
+    exported_pdf: list[str] = []
+    fake_td_gui.exportPageAsPdf = lambda page, p: (exported_pdf.append(p), open(p, "wb").write(b"%PDF-1.4"))
+    fake_td_gui.exportPageAsSvg = lambda page, p: open(p, "wb").write(b"<svg/>")
+    monkeypatch.setitem(sys.modules, "TechDrawGui", fake_td_gui)
+
+    doc = fc.ActiveDocument
+    body = doc.addObject("PartDesign::Body", "Body")
+    x_ax = types.SimpleNamespace(Name="X_Axis001", Role="X_Axis")
+    yz_pl = types.SimpleNamespace(Name="YZ_Plane001", Role="YZ_Plane")
+    xy_pl = types.SimpleNamespace(Name="XY_Plane001", Role="XY_Plane")
+    z_ax = types.SimpleNamespace(Name="Z_Axis001", Role="Z_Axis")
+    body.Origin = types.SimpleNamespace(OriginFeatures=[x_ax, yz_pl, xy_pl, z_ax], getObject=lambda n: None)
+
+    def _new_obj(type_id, name):
+        o = FakeObject(name, type_id)
+        if type_id == "PartDesign::Hole":
+            o.DepthType = "Dimension"
+            o.HoleCutType = "None"
+            o.ModelThread = False
+            o.Reversed = False
+        doc.Objects.append(o)
+        body.Group = list(getattr(body, "Group", [])) + [o]
+        return o
+
+    body.Group = []
+    body.newObject = _new_obj
+
+    sketch = body.newObject("Sketcher::SketchObject", "Sk")
+
+    # Multi-body Origin Role resolution works for DatumPlane, Thickness, Hole, Revolution, Mirror, Linear/PolarPattern
+    datum = partdesign.create_datum_plane("Body", attachment_support="XY_Plane", offset=[0, 0, 10])
+    assert datum["attachment_support"] == "XY_Plane001"
+
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Length = 10.0
+    pad.PropertiesList.append("Length")
+    pad.setExpression = lambda prop, expr: setattr(pad, "_expr", (prop, expr))
+    pad.ViewObject = types.SimpleNamespace(Visibility=True, Transparency=0, ShapeColor=(0.8, 0.8, 0.8))
+
+    vs_res = partdesign.create_varset("Params", variables=[{"name": "Wall", "type": "Length", "value": 4.0}])
+    vs = doc.getObject(vs_res["name"])
+    vs.addProperty = lambda full_t, p_name, grp: (vs.PropertiesList.append(p_name), setattr(vs, p_name, 0.0))
+    vs.Wall = 4.0
+    vs.PropertiesList.append("Wall")
+
+    # VarSet variable creation via set_property + expression binding on Pad.Length
+    partdesign.set_property("Params", "Height", value=25.0, property_type="Length")
+    assert vs.Height == 25.0
+    set_res = partdesign.set_property("Pad", "Length", value=25.0, expression="Params.Height")
+    assert set_res["value"] == 25.0
+    assert pad._expr == ("Length", "Params.Height")
+
+    app_res = partdesign.set_appearance("Pad", visible=True, transparency=40, color=[255, 0, 0])
+    assert app_res["transparency"] == 40
+
+    thick = partdesign.partdesign_thickness("Pad", faces=["Face6"], thickness=2.0)
+    assert doc.getObject(thick["name"]).Reversed is True
+
+    hole = partdesign.partdesign_hole("Sk", diameter=6.0, through_all=True)
+    assert doc.getObject(hole["name"]).DepthType == "ThroughAll"
+
+    rev = partdesign.partdesign_revolution("Sk", angle=180.0, axis="V_Axis")
+    assert doc.getObject(rev["name"]).ReferenceAxis == (sketch, ["V_Axis"])
+
+    mir = partdesign.partdesign_mirrored(["Pad"], mirror_plane="YZ_Plane")
+    assert doc.getObject(mir["name"]).MirrorPlane == (yz_pl, [""])
+
+    lp = partdesign.partdesign_linear_pattern(["Pad"], direction="X_Axis", occurrences=3, length=60.0)
+    assert doc.getObject(lp["name"]).Direction == (x_ax, [""])
+
+    pp = partdesign.partdesign_polar_pattern(["Pad"], axis="Z_Axis", occurrences=4)
+    assert doc.getObject(pp["name"]).Axis == (z_ax, [""])
+
+    # TechDraw dimension, section, PDF export
+    page = doc.addObject("TechDraw::DrawPage", "Page")
+    page.addView = lambda v: None
+    view = doc.addObject("TechDraw::DrawViewPart", "View")
+    view.Source = [body]
+    view.Scale = 1.0
+
+    dim_res = techdraw.add_techdraw_dimension("Page", "View", ["Edge0"], dim_type="Distance")
+    assert doc.getObject(dim_res["name"]).Type == "Distance"
+
+    sec_res = techdraw.add_techdraw_section("Page", "View", section_normal=[0, 1, 0])
+    assert doc.getObject(sec_res["name"]).BaseView is view
+
+    pdf_out = tmp_path / "sheet.pdf"
+    pdf_res = techdraw.export_techdraw_page("Page", str(pdf_out))
+    assert pdf_res["exported"] is True
+    assert pdf_res["file_size_bytes"] > 0
