@@ -226,7 +226,11 @@ try {
         $uvExe = Install-UvIfMissing
     }
 
-    if ($uvExe) {
+    $ServerExe = Join-Path $RepoRoot ".venv\Scripts\freecad-tutor-mcp.exe"
+    $RunningServer = Get-Process -Name "freecad-tutor-mcp" -ErrorAction SilentlyContinue
+    if ($RunningServer -and (Test-Path $ServerExe)) {
+        Write-Host "  [INFO] freecad-tutor-mcp.exe is currently running (likely via Claude Desktop); skipping .exe shim reinstall (restart Claude Desktop to pick up server changes)." -ForegroundColor Yellow
+    } elseif ($uvExe) {
         Write-Host "  Setting up .venv via uv ($uvExe)..."
         if ($realPy) {
             & $uvExe venv --allow-existing .venv

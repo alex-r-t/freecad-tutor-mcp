@@ -10,16 +10,38 @@ from tests.conftest import FakeObject, FakeVector
 
 
 def _reload_handlers():
-    from handlers import common, document, execution, inspection, modeling, recompute, sketcher, ui_discovery, viewport
+    from handlers import (
+        common,
+        document,
+        execution,
+        inspection,
+        modeling,
+        recompute,
+        sketcher,
+        ui_discovery,
+        ui_highlight,
+        viewport,
+    )
 
-    for mod in (common, document, inspection, sketcher, recompute, ui_discovery, viewport, modeling, execution):
+    for mod in (
+        common,
+        document,
+        inspection,
+        sketcher,
+        recompute,
+        ui_discovery,
+        ui_highlight,
+        viewport,
+        modeling,
+        execution,
+    ):
         importlib.reload(mod)
-    return document, inspection, sketcher, recompute, ui_discovery, viewport, modeling, execution
+    return document, inspection, sketcher, recompute, ui_discovery, ui_highlight, viewport, modeling, execution
 
 
 def test_document_graph_tnp_and_nan_sanitization(fake_freecad):
     fc, gui = fake_freecad
-    document, _, _, _, _, _, _, _ = _reload_handlers()
+    document, _, _, _, _, _, _, _, _ = _reload_handlers()
 
     doc = fc.ActiveDocument
     pad = doc.addObject("PartDesign::Pad", "Pad")
@@ -43,7 +65,7 @@ def test_document_graph_tnp_and_nan_sanitization(fake_freecad):
 
 def test_sketch_diagnostics_uses_dof_not_solve_status(fake_freecad):
     fc, _ = fake_freecad
-    _, _, sketcher, _, _, _, _, _ = _reload_handlers()
+    _, _, sketcher, _, _, _, _, _, _ = _reload_handlers()
 
     doc = fc.ActiveDocument
     sk = doc.addObject("Sketcher::SketchObject", "Sketch")
@@ -80,7 +102,7 @@ def test_sketch_diagnostics_uses_dof_not_solve_status(fake_freecad):
 
 def test_ui_discovery_commands_and_console(fake_freecad):
     fc, gui = fake_freecad
-    _, _, _, _, ui_discovery, _, _, _ = _reload_handlers()
+    _, _, _, _, ui_discovery, _, _, _, _ = _reload_handlers()
 
     class FakeCmd:
         def __init__(self, info, active):
@@ -133,7 +155,7 @@ def test_ui_discovery_commands_and_console(fake_freecad):
 
 def test_viewport_blocks_techdraw_tab_and_caps_size(fake_freecad, tmp_path):
     _, gui = fake_freecad
-    _, _, _, _, _, viewport, _, _ = _reload_handlers()
+    _, _, _, _, _, _, viewport, _, _ = _reload_handlers()
 
     # Active tab is a TechDraw page (no saveImage attribute)
     gui._active_view = types.SimpleNamespace(getObjectInfo=lambda: None)
@@ -159,7 +181,7 @@ def test_viewport_blocks_techdraw_tab_and_caps_size(fake_freecad, tmp_path):
 
 def test_modeling_rolls_back_invalid_pad_and_blocks_during_dialog(fake_freecad):
     fc, gui = fake_freecad
-    _, _, _, recompute, _, _, modeling, _ = _reload_handlers()
+    _, _, _, recompute, _, _, _, modeling, _ = _reload_handlers()
 
     doc = fc.ActiveDocument
     body = FakeObject("Body", "PartDesign::Body")
@@ -188,7 +210,7 @@ def test_modeling_rolls_back_invalid_pad_and_blocks_during_dialog(fake_freecad):
 
 def test_part_primitive_and_pocket_through_all(fake_freecad):
     fc, _ = fake_freecad
-    _, _, _, _, ui_discovery, _, modeling, _ = _reload_handlers()
+    _, _, _, _, ui_discovery, _, _, modeling, _ = _reload_handlers()
 
     box_res = modeling.create_part_primitive("box", name="TutorBox", dimensions={"length": 20, "width": 10, "height": 5})
     assert box_res["type_id"] == "Part::Box"
@@ -220,3 +242,186 @@ def test_part_primitive_and_pocket_through_all(fake_freecad):
     # Unloaded workbench hint appears when searching for commands not yet registered.
     td_hint = ui_discovery.find_ui_command("techdraw")
     assert len(td_hint["unloaded_workbench_hints"]) >= 1
+
+
+def test_ui_highlight_toolbar_panel_menu_and_clear(fake_freecad, monkeypatch):
+    _, gui = fake_freecad
+    _, _, _, _, _, ui_highlight, _, _, _ = _reload_handlers()
+
+    class _Rect:
+        def __init__(self, x: int, y: int, w: int, h: int):
+            self._x, self._y, self._w, self._h = x, y, w, h
+
+        def x(self):
+            return self._x
+
+        def y(self):
+            return self._y
+
+        def width(self):
+            return self._w
+
+        def height(self):
+            return self._h
+
+        def center(self):
+            return (self._x + self._w // 2, self._y + self._h // 2)
+
+        def contains(self, pt):
+            return self._x <= pt[0] <= self._x + self._w and self._y <= pt[1] <= self._y + self._h
+
+    class _FakeWidget:
+        def __init__(self, name: str, rect: _Rect, visible: bool = True, title: str = "", local_rect: _Rect | None = None):
+            self._name = name
+            self._rect = rect
+            self._local_rect = local_rect or rect
+            self._visible = visible
+            self._title = title or name
+
+        def objectName(self):
+            return self._name
+
+        def windowTitle(self):
+            return self._title
+
+        def isVisible(self):
+            return self._visible
+
+        def x(self):
+            return self._rect.x()
+
+        def y(self):
+            return self._rect.y()
+
+        def width(self):
+            return self._rect.width()
+
+        def height(self):
+            return self._rect.height()
+
+        def geometry(self):
+            return self._local_rect
+
+        def rect(self):
+            return _Rect(0, 0, self._rect.width(), self._rect.height())
+
+    class _FakeDock(_FakeWidget):
+        pass
+
+    class _FakeCombo(_FakeWidget):
+        def parentWidget(self):
+            return None
+
+    class _FakeToolButton(_FakeWidget):
+        pass
+
+    class _FakeToolBar(_FakeWidget):
+        def __init__(self, name: str, rect: _Rect, actions_map: dict, overflow_btn=None):
+            super().__init__(name, rect, visible=True, title=name)
+            self._actions_map = actions_map
+            self._overflow_btn = overflow_btn
+
+        def actions(self):
+            return list(self._actions_map.keys())
+
+        def widgetForAction(self, act):
+            return self._actions_map.get(act)
+
+        def findChildren(self, cls):
+            if cls is _FakeToolButton and self._overflow_btn is not None:
+                return [self._overflow_btn]
+            return []
+
+    class _FakeAction:
+        def __init__(self, obj_name: str, text: str):
+            self._obj_name = obj_name
+            self._text = text
+
+        def objectName(self):
+            return self._obj_name
+
+        def text(self):
+            return self._text
+
+    pad_act = _FakeAction("PartDesign_Pad", "&Pad")
+    pad_btn = _FakeToolButton("PartDesign_Pad", _Rect(40, 80, 28, 28), local_rect=_Rect(40, 4, 28, 28))
+    fillet_act = _FakeAction("PartDesign_Fillet", "Fillet")
+    # Simulate Fillet button clipped past toolbar width (center x=354 > toolbar width 200) -> overflow chevron
+    fillet_btn = _FakeToolButton("PartDesign_Fillet", _Rect(340, 80, 28, 28), local_rect=_Rect(340, 4, 28, 28))
+    ext_btn = _FakeToolButton("qt_toolbutton_ext", _Rect(185, 80, 14, 28))
+    tb = _FakeToolBar("Part Design Modeling Features", _Rect(0, 75, 200, 36), {pad_act: pad_btn, fillet_act: fillet_btn}, overflow_btn=ext_btn)
+    model_dock = _FakeDock("Model", _Rect(0, 120, 280, 500), title="Model")
+    wb_combo = _FakeCombo("WorkbenchComboBox", _Rect(300, 42, 160, 26))
+
+    class _FakeMenuBar:
+        def __init__(self, top_actions):
+            self._top_actions = top_actions
+
+        def actions(self):
+            return self._top_actions
+
+        def actionGeometry(self, _act):
+            return _Rect(90, 22, 65, 22)
+
+    menu_only_act = types.SimpleNamespace(objectName=lambda: "Std_Measure", text=lambda: "Measure", menu=lambda: None)
+    view_menu_act = types.SimpleNamespace(
+        text=lambda: "&View",
+        menu=lambda: types.SimpleNamespace(actions=lambda: [menu_only_act]),
+    )
+
+    def _find_children(cls):
+        if cls is _FakeToolBar:
+            return [tb]
+        if cls is _FakeDock:
+            return [model_dock]
+        if cls is _FakeCombo:
+            return [wb_combo]
+        return []
+
+    gui._main_window = types.SimpleNamespace(
+        menuBar=lambda: _FakeMenuBar([view_menu_act]),
+        findChildren=_find_children,
+    )
+
+    fake_qt_widgets = types.SimpleNamespace(
+        QToolBar=_FakeToolBar,
+        QToolButton=_FakeToolButton,
+        QDockWidget=_FakeDock,
+        QWidget=_FakeDock,
+        QComboBox=_FakeCombo,
+    )
+    monkeypatch.setattr(ui_highlight, "_qt_modules", lambda: (None, None, fake_qt_widgets))
+
+    # 1. Exact visible toolbar button
+    res_pad = ui_highlight.highlight_ui_element("PartDesign_Pad")
+    assert res_pad["highlighted"] is True
+    assert res_pad["target_kind"] == "toolbar_button"
+    assert res_pad["screen_rect"] == {"x": 40, "y": 80, "width": 28, "height": 28}
+
+    # 2. Clipped toolbar button points to '>>' overflow button
+    res_fillet = ui_highlight.highlight_ui_element("Fillet")
+    assert res_fillet["highlighted"] is True
+    assert res_fillet["target_kind"] == "toolbar_overflow"
+    assert res_fillet["screen_rect"] == {"x": 185, "y": 80, "width": 14, "height": 28}
+
+    # 3. Named panel
+    res_model = ui_highlight.highlight_ui_element("Model")
+    assert res_model["highlighted"] is True
+    assert res_model["target_kind"] == "panel"
+    assert res_model["display_name"] == "Model"
+
+    # 4. Menu-only item points to top-level menu tab
+    res_menu = ui_highlight.highlight_ui_element("Std_Measure")
+    assert res_menu["highlighted"] is True
+    assert res_menu["target_kind"] == "menu_bar_tab"
+    assert "View -> Measure" in res_menu["callout"]
+
+    # 5. Unloaded workbench command highlights the Workbench switcher
+    res_td = ui_highlight.highlight_ui_element("techdraw")
+    assert res_td["highlighted"] is True
+    assert res_td["target_kind"] == "workbench_switcher_hint"
+    assert res_td["suggested_workbench"] == "TechDrawWorkbench"
+
+    # 6. Clear flag cleans up
+    cleared = ui_highlight.highlight_ui_element(clear=True)
+    assert cleared["cleared"] is True

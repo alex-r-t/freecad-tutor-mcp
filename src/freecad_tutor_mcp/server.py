@@ -23,7 +23,7 @@ SERVER_INSTRUCTIONS = """You are connected to a live FreeCAD 1.0/1.1+ instance v
 
 Workflow rules:
 1. Inspect before acting: use `get_document_graph`, `get_sketch_diagnostics`, `get_selection`, and `get_console_output` to observe the student's real model state.
-2. Never guess FreeCAD menu or toolbar locations: call `find_ui_command` to get exact live menu paths, shortcuts, and why a button might be greyed out.
+2. Never guess FreeCAD menu or toolbar locations: call `find_ui_command` to get exact live menu paths, shortcuts, and why a button might be greyed out, and use `highlight_ui_element` to put a temporary spotlight on the button, menu, or panel in the live FreeCAD window.
 3. Do not mutate the student's active coursework file unless explicitly asked; prefer `create_document(name="Tutor_Demo")` for demonstrations.
 4. All editing tools are wrapped in FreeCAD undo transactions (`Ctrl+Z` / `undo`)."""
 
@@ -129,6 +129,32 @@ def create_server(bridge: FreeCADBridge | None = None) -> MCPServer:
         return _call(
             "find_ui_command",
             {"query": query, "workbench_filter": workbench_filter, "limit": limit},
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def highlight_ui_element(
+        target: str = "",
+        label: str = "",
+        duration_s: float = 6.0,
+        clear: bool = False,
+    ) -> dict[str, Any]:
+        """Put a temporary, click-through visual spotlight on a FreeCAD button, menu, panel, or workbench selector.
+
+        Args:
+            target: Command name (e.g. 'PartDesign_Pad'), button label ('Pad'),
+                or panel name ('Model', 'Tasks', 'Report view', 'Workbench').
+            label: Optional short callout text shown next to the highlight frame.
+            duration_s: Auto-dismiss time in seconds (1.0-20.0).
+            clear: Set True to immediately remove any active highlight.
+        """
+        return _call(
+            "highlight_ui_element",
+            {
+                "target": target,
+                "label": label,
+                "duration_s": duration_s,
+                "clear": clear,
+            },
         )
 
     @mcp.tool(annotations=READ_ONLY)

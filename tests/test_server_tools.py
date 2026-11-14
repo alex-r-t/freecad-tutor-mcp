@@ -45,7 +45,7 @@ def test_tool_annotations_and_curated_surface():
     async def _inspect():
         tools = await mcp.list_tools()
         by_name = {t.name: t for t in tools}
-        assert len(tools) == 30
+        assert len(tools) == 31
 
         # Diagnostic & UI read tools must be read_only_hint=True
         for ro in (
@@ -58,6 +58,7 @@ def test_tool_annotations_and_curated_surface():
             "tracked_recompute",
             "get_console_output",
             "find_ui_command",
+            "highlight_ui_element",
             "list_workbenches",
             "get_selection",
             "get_view",
@@ -157,7 +158,7 @@ def test_stdio_entrypoint_end_to_end():
                 assert init_res.server_info.name == "freecad-tutor"
 
                 listed = await session.list_tools()
-                assert len(listed.tools) == 30
+                assert len(listed.tools) == 31
 
                 status_res = await session.call_tool("get_rpc_status", {})
                 status_payload = json.loads(status_res.content[0].text)

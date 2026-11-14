@@ -67,6 +67,13 @@ def run_gui(host: str, port: int) -> None:
         pad_before = bridge.call("find_ui_command", {"query": "Pad"})
         assert pad_before["matches"], "Expected PartDesign_Pad in live command list"
 
+        hl_btn = bridge.call("highlight_ui_element", {"target": "PartDesign_Pad", "duration_s": 2.0})
+        assert hl_btn["highlighted"] is True and hl_btn["overlay_rendered"] is True
+        hl_wb = bridge.call("highlight_ui_element", {"target": "Workbench", "duration_s": 2.0})
+        assert hl_wb["highlighted"] is True
+        hl_clr = bridge.call("highlight_ui_element", {"clear": True})
+        assert hl_clr["cleared"] is True
+
         body = bridge.call("create_partdesign_body", {"name": "Body", "doc_name": doc["name"]})
         sk = bridge.call("create_sketch", {"body_name": body["name"], "doc_name": doc["name"]})
         bridge.call(

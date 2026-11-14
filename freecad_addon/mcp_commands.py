@@ -13,7 +13,17 @@ _server: RPCServer | None = None
 
 def _build_handler_map() -> dict:
     """Import and return all RPC handlers."""
-    from handlers import document, execution, inspection, modeling, recompute, sketcher, ui_discovery, viewport
+    from handlers import (
+        document,
+        execution,
+        inspection,
+        modeling,
+        recompute,
+        sketcher,
+        ui_discovery,
+        ui_highlight,
+        viewport,
+    )
 
     return {
         # Document & inspection
@@ -26,6 +36,7 @@ def _build_handler_map() -> dict:
         "tracked_recompute": recompute.tracked_recompute,
         # UI discovery & visual context
         "find_ui_command": ui_discovery.find_ui_command,
+        "highlight_ui_element": ui_highlight.highlight_ui_element,
         "list_workbenches": ui_discovery.list_workbenches,
         "activate_workbench": ui_discovery.activate_workbench,
         "get_selection": ui_discovery.get_selection,
@@ -147,6 +158,12 @@ def ensure_started(silent_if_running: bool = False) -> RPCServer | None:
 def stop_server() -> None:
     """Stop the running RPC server."""
     global _server
+    try:
+        from handlers import ui_highlight
+
+        ui_highlight.clear_ui_highlight()
+    except Exception:
+        pass
     if _server is None or not _server.is_running:
         FreeCAD.Console.PrintMessage("FreeCAD Tutor MCP: RPC server is not running\n")
         return

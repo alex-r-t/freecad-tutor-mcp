@@ -42,6 +42,7 @@ Then:
 
 ### UI & Visual Context
 * `find_ui_command` — Finds menu paths, toolbars, shortcuts, and `enabled`/`disabled_reason` from live FreeCAD
+* `highlight_ui_element` — Shows a temporary, click-through spotlight box + callout label over a toolbar button, menu tab, dock panel (`Model`, `Tasks`, `Report view`), or workbench selector
 * `list_workbenches` / `activate_workbench`
 * `get_selection` / `set_selection`
 * `get_view` — Multi-angle viewport PNGs (`Isometric`, `Front`, `Top`, `Right`, etc.) with `focus_object` and TechDraw-tab safety
@@ -64,6 +65,6 @@ uv run pytest -v
 
 For live FreeCAD verification (once FreeCAD 1.0/1.1+ is installed):
 ```powershell
-FreeCADCmd.exe tests/live_smoke.py --headless
+freecadcmd.exe -c "import sys; sys.argv=['live_smoke.py','--headless']; exec(open('tests/live_smoke.py').read(), {'__name__':'__main__'})"
 uv run python tests/live_smoke.py --gui
 ```
