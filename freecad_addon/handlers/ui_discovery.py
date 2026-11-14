@@ -14,7 +14,7 @@ from handlers.common import get_ui_edit_state, require_gui, resolve_doc
 # activate so the AI never reports a real tool as "missing".
 _LAZY_WORKBENCH_COMMAND_HINTS: list[dict[str, str]] = [
     {
-        "keywords": "pad pocket revolution groove loft sweep fillet chamfer hole body datum plane sketch partdesign",
+        "keywords": "pad pocket thickness revolution groove loft sweep fillet chamfer hole mirror linear polar pattern draft body datum plane sketch partdesign",
         "workbench": "PartDesignWorkbench",
         "menu_name": "Part Design",
         "note": "PartDesign commands load when PartDesignWorkbench is activated.",

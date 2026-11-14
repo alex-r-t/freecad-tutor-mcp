@@ -219,6 +219,7 @@ def fake_freecad(monkeypatch: pytest.MonkeyPatch):
     gui_mod.activeWorkbench = lambda: types.SimpleNamespace(name=lambda: gui_mod._active_wb)
     gui_mod.activateWorkbench = lambda name: setattr(gui_mod, "_active_wb", name)
     gui_mod.runCommand = lambda name: None
+    gui_mod.addCommand = lambda name, cmd: None
 
     monkeypatch.setitem(sys.modules, "FreeCAD", fc_mod)
     monkeypatch.setitem(sys.modules, "FreeCADGui", gui_mod)

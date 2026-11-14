@@ -19,13 +19,17 @@ _server: RPCServer | None = None
 
 def _build_handler_map() -> dict:
     """Import and return all RPC handlers."""
+    import activity_tracker
     from handlers import (
         document,
+        error_kb,
         execution,
         inspection,
         modeling,
+        partdesign,
         recompute,
         sketcher,
+        techdraw,
         ui_discovery,
         ui_highlight,
         viewport,
@@ -36,10 +40,19 @@ def _build_handler_map() -> dict:
         "list_documents": document.list_documents,
         "get_document_graph": document.get_document_graph,
         "create_document": document.create_document,
+        "save_document": document.save_document,
+        "open_document": document.open_document,
+        "close_document": document.close_document,
+        "export_document": document.export_document,
         "inspect_object": inspection.inspect_object,
         "analyze_shape": inspection.analyze_shape,
+        "find_edges": inspection.find_edges,
+        "find_faces": inspection.find_faces,
+        "measure_distance": inspection.measure_distance,
         "get_sketch_diagnostics": sketcher.get_sketch_diagnostics,
         "tracked_recompute": recompute.tracked_recompute,
+        "get_recent_activity": activity_tracker.get_recent_activity,
+        "explain_freecad_error": error_kb.explain_freecad_error,
         # UI discovery & visual context
         "find_ui_command": ui_discovery.find_ui_command,
         "highlight_ui_element": ui_highlight.highlight_ui_element,
@@ -48,8 +61,9 @@ def _build_handler_map() -> dict:
         "get_selection": ui_discovery.get_selection,
         "set_selection": ui_discovery.set_selection,
         "get_console_output": ui_discovery.get_console_output,
+        "set_view": viewport.set_view,
         "get_view": viewport.get_view,
-        # Undo / redo & confirmed modeling
+        # Undo / redo, Sketcher & PartDesign
         "undo": modeling.undo,
         "redo": modeling.redo,
         "get_undo_redo_status": modeling.get_undo_redo_status,
@@ -58,12 +72,30 @@ def _build_handler_map() -> dict:
         "edit_sketch": modeling.edit_sketch,
         "pad_sketch": modeling.pad_sketch,
         "pocket_sketch": modeling.pocket_sketch,
+        "partdesign_thickness": partdesign.partdesign_thickness,
+        "partdesign_hole": partdesign.partdesign_hole,
+        "partdesign_revolution": partdesign.partdesign_revolution,
+        "partdesign_groove": partdesign.partdesign_groove,
+        "partdesign_loft": partdesign.partdesign_loft,
+        "partdesign_sweep": partdesign.partdesign_sweep,
+        "partdesign_mirrored": partdesign.partdesign_mirrored,
+        "partdesign_linear_pattern": partdesign.partdesign_linear_pattern,
+        "partdesign_polar_pattern": partdesign.partdesign_polar_pattern,
+        "partdesign_draft": partdesign.partdesign_draft,
+        "create_datum_plane": partdesign.create_datum_plane,
+        "create_varset": partdesign.create_varset,
+        "set_property": partdesign.set_property,
+        "set_appearance": partdesign.set_appearance,
         "create_part_primitive": modeling.create_part_primitive,
         "boolean_operation": modeling.boolean_operation,
         "fillet_edges": modeling.fillet_edges,
         "chamfer_edges": modeling.chamfer_edges,
+        # TechDraw
         "create_techdraw_page": modeling.create_techdraw_page,
         "add_techdraw_view": modeling.add_techdraw_view,
+        "add_techdraw_dimension": techdraw.add_techdraw_dimension,
+        "add_techdraw_section": techdraw.add_techdraw_section,
+        "export_techdraw_page": techdraw.export_techdraw_page,
         # Escape hatch
         "execute_script": execution.execute_script,
     }
@@ -74,7 +106,7 @@ def _reload_handlers() -> dict:
     import importlib
 
     for name in list(sys.modules):
-        if name == "handlers" or name.startswith("handlers."):
+        if name == "activity_tracker" or name == "handlers" or name.startswith("handlers."):
             importlib.reload(sys.modules[name])
     if _server is not None:
         _server.register_all(_build_handler_map())
@@ -146,6 +178,12 @@ def ensure_started(silent_if_running: bool = False) -> RPCServer | None:
     try:
         srv.start()
         _server = srv
+        try:
+            import activity_tracker
+
+            activity_tracker.install_activity_observer()
+        except Exception:
+            pass
         msg = (
             f"FreeCAD Tutor MCP: RPC server auto-started on {host}:{port} "
             f"(PID {os.getpid()}, protocol {PROTOCOL_VERSION})\n"
@@ -165,6 +203,12 @@ def ensure_started(silent_if_running: bool = False) -> RPCServer | None:
 def stop_server() -> None:
     """Stop the running RPC server."""
     global _server
+    try:
+        import activity_tracker
+
+        activity_tracker.uninstall_activity_observer()
+    except Exception:
+        pass
     try:
         from handlers import ui_highlight
 

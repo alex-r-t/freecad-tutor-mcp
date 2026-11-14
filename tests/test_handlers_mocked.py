@@ -918,3 +918,128 @@ def test_partdesign_varset_datum_property_and_techdraw(fake_freecad, monkeypatch
     pdf_res = techdraw.export_techdraw_page("Page", str(pdf_out))
     assert pdf_res["exported"] is True
     assert pdf_res["file_size_bytes"] > 0
+
+
+def test_activity_tracker_and_task_panel_scraping(fake_freecad, monkeypatch: pytest.MonkeyPatch):
+    fc, gui = fake_freecad
+    _reload_handlers()
+    from handlers import common
+    import activity_tracker
+
+    importlib.reload(activity_tracker)
+
+    added_observers: list[Any] = []
+    removed_observers: list[Any] = []
+    fc.addDocumentObserver = lambda obs: added_observers.append(obs)
+    fc.removeDocumentObserver = lambda obs: removed_observers.append(obs)
+
+    tracker = activity_tracker.get_activity_tracker()
+    tracker.clear()
+    tracker.install()
+    assert tracker.is_installed is True
+    assert len(added_observers) == 1
+
+    obs = added_observers[0]
+    pad = FakeObject("Pad", "PartDesign::Pad")
+    pad.Document = fc.ActiveDocument
+    obs.slotCreatedDocument(fc.ActiveDocument)
+    obs.slotCreatedObject(pad)
+    # Rapid property changes coalesce into 1 event
+    obs.slotChangedObject(pad, "Length")
+    obs.slotChangedObject(pad, "Length")
+    # Internal Shape/State noise is filtered out
+    obs.slotChangedObject(pad, "Shape")
+
+    recent = activity_tracker.get_recent_activity(limit=10)
+    assert recent["observer_active"] is True
+    assert recent["count"] == 3
+    assert [e["event"] for e in recent["events"]] == ["property_changed", "object_created", "document_created"]
+
+    tracker.uninstall()
+    assert len(removed_observers) == 1
+
+    # Task panel UI widget inspection
+    class _FakeWidget:
+        def __init__(self, visible=True, enabled=True):
+            self._v, self._e = visible, enabled
+
+        def isVisible(self):
+            return self._v
+
+        def isEnabled(self):
+            return self._e
+
+        def objectName(self):
+            return ""
+
+    class _FakePushButton(_FakeWidget):
+        def __init__(self, text, enabled=True):
+            super().__init__(True, enabled)
+            self._t = text
+
+        def text(self):
+            return self._t
+
+    class _FakeCheckBox(_FakeWidget):
+        def __init__(self, text, checked=True):
+            super().__init__()
+            self._t, self._c = text, checked
+
+        def text(self):
+            return self._t
+
+        def isChecked(self):
+            return self._c
+
+    class _FakeSpin(_FakeWidget):
+        def text(self):
+            return "12.50 mm"
+
+        def value(self):
+            return 12.5
+
+    class _FakeLabel(_FakeWidget):
+        def text(self):
+            return "Pad parameters"
+
+    class _FakeRadio(_FakeWidget):
+        pass
+
+    class _FakeCombo(_FakeWidget):
+        pass
+
+    class _FakeLine(_FakeWidget):
+        pass
+
+    class _FakeDock(_FakeWidget):
+        def windowTitle(self):
+            return "Tasks"
+
+        def findChildren(self, cls):
+            return [
+                _FakeLabel(),
+                _FakeSpin(),
+                _FakeCheckBox("Symmetric to plane", True),
+                _FakePushButton("OK", True),
+            ]
+
+    gui.Control._active = True
+    gui._main_window = types.SimpleNamespace(findChildren=lambda cls: [_FakeDock()])
+    fake_qtw = types.SimpleNamespace(
+        QDockWidget=_FakeDock,
+        QWidget=_FakeWidget,
+        QPushButton=_FakePushButton,
+        QCheckBox=_FakeCheckBox,
+        QRadioButton=_FakeRadio,
+        QComboBox=_FakeCombo,
+        QAbstractSpinBox=_FakeSpin,
+        QLineEdit=_FakeLine,
+        QLabel=_FakeLabel,
+    )
+    monkeypatch.setattr(common, "_import_qt_widgets", lambda: fake_qtw)
+
+    ui_state = common.get_ui_edit_state()
+    assert ui_state["task_panel"] is not None
+    assert ui_state["task_panel"]["buttons"][0]["text"] == "OK"
+    assert ui_state["task_panel"]["controls"][1]["value"] == 12.5
+    assert ui_state["task_panel"]["controls"][2]["checked"] is True

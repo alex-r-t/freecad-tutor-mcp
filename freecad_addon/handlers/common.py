@@ -40,6 +40,117 @@ def require_gui() -> Any:
     return FreeCADGui
 
 
+def _import_qt_widgets():
+    """Import QtWidgets across PySide / PySide6 / PySide2 (returns None if headless)."""
+    for mod in ("PySide", "PySide6", "PySide2"):
+        try:
+            pkg = __import__(mod, fromlist=["QtWidgets"])
+            return pkg.QtWidgets
+        except (ImportError, AttributeError):
+            continue
+    return None
+
+
+def _clean_widget_text(raw: str) -> str:
+    return (raw or "").replace("&", "").strip()
+
+
+def _inspect_task_panel(main_window: Any) -> dict[str, Any] | None:
+    """Serialize visible controls inside FreeCAD's active Tasks dock / TaskView."""
+    if main_window is None or not hasattr(main_window, "findChildren"):
+        return None
+    QtWidgets = _import_qt_widgets()
+    if QtWidgets is None:
+        return None
+
+    try:
+        docks = main_window.findChildren(QtWidgets.QDockWidget)
+    except Exception:
+        return None
+
+    task_dock = None
+    for dock in docks:
+        title = _clean_widget_text(dock.windowTitle()).lower() if hasattr(dock, "windowTitle") else ""
+        obj_name = (dock.objectName() or "").lower() if hasattr(dock, "objectName") else ""
+        if "task" in title or "task" in obj_name:
+            task_dock = dock
+            break
+    if task_dock is None:
+        return None
+
+    controls: list[dict[str, Any]] = []
+    buttons: list[dict[str, Any]] = []
+    max_controls = 60
+
+    try:
+        children = task_dock.findChildren(QtWidgets.QWidget)
+    except Exception:
+        return None
+
+    for widget in children:
+        if len(controls) >= max_controls and len(buttons) >= 15:
+            break
+        try:
+            if hasattr(widget, "isVisible") and not widget.isVisible():
+                continue
+            cls_name = type(widget).__name__
+            enabled = bool(widget.isEnabled()) if hasattr(widget, "isEnabled") else True
+            obj_name = widget.objectName() if hasattr(widget, "objectName") else ""
+
+            if isinstance(widget, QtWidgets.QPushButton):
+                text = _clean_widget_text(widget.text())
+                if text and len(buttons) < 15:
+                    buttons.append({"text": text, "enabled": enabled, "object_name": obj_name})
+                continue
+
+            if len(controls) >= max_controls:
+                continue
+
+            if isinstance(widget, (QtWidgets.QCheckBox, QtWidgets.QRadioButton)):
+                controls.append({
+                    "kind": "checkbox" if isinstance(widget, QtWidgets.QCheckBox) else "radio",
+                    "label": _clean_widget_text(widget.text()),
+                    "checked": bool(widget.isChecked()),
+                    "enabled": enabled,
+                })
+            elif isinstance(widget, QtWidgets.QComboBox):
+                controls.append({
+                    "kind": "combo",
+                    "object_name": obj_name,
+                    "current": widget.currentText(),
+                    "enabled": enabled,
+                })
+            elif hasattr(QtWidgets, "QAbstractSpinBox") and isinstance(widget, QtWidgets.QAbstractSpinBox):
+                val_text = widget.text() if hasattr(widget, "text") else ""
+                val = widget.value() if hasattr(widget, "value") else None
+                controls.append({
+                    "kind": cls_name,
+                    "object_name": obj_name,
+                    "text": val_text,
+                    "value": sanitize_json(val),
+                    "enabled": enabled,
+                })
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                controls.append({
+                    "kind": "line_edit",
+                    "object_name": obj_name,
+                    "text": widget.text(),
+                    "enabled": enabled,
+                })
+            elif isinstance(widget, QtWidgets.QLabel):
+                text = _clean_widget_text(widget.text())
+                if text and len(text) <= 200:
+                    controls.append({"kind": "label", "text": text})
+        except Exception:
+            continue
+
+    return {
+        "dock_title": _clean_widget_text(task_dock.windowTitle()) if hasattr(task_dock, "windowTitle") else "Tasks",
+        "buttons": buttons,
+        "controls": controls,
+    }
+
+
 def get_ui_edit_state() -> dict[str, Any]:
     """Check whether FreeCAD currently has a Task panel open or an object in edit mode.
 
@@ -48,7 +159,7 @@ def get_ui_edit_state() -> dict[str, Any]:
     lets the AI diagnose the UI state immediately.
     """
     if FreeCADGui is None or not getattr(FreeCAD, "GuiUp", False):
-        return {"gui_up": False, "active_dialog": False, "in_edit": None}
+        return {"gui_up": False, "active_dialog": False, "in_edit": None, "task_panel": None}
 
     active_dialog = False
     try:
@@ -72,10 +183,18 @@ def get_ui_edit_state() -> dict[str, Any]:
     except Exception:
         pass
 
+    task_panel = None
+    if active_dialog and hasattr(FreeCADGui, "getMainWindow"):
+        try:
+            task_panel = _inspect_task_panel(FreeCADGui.getMainWindow())
+        except Exception:
+            task_panel = None
+
     return {
         "gui_up": True,
         "active_dialog": active_dialog,
         "in_edit": in_edit,
+        "task_panel": task_panel,
     }
 
 

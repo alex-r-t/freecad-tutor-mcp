@@ -8,6 +8,7 @@ from typing import Any
 import FreeCAD
 
 from handlers.common import resolve_doc, undo_transaction
+from handlers.error_kb import explain_freecad_error
 
 try:
     import FreeCADGui
@@ -57,4 +58,5 @@ def execute_script(
             "stdout": stdout_capture.getvalue(),
             "stderr": stderr_capture.getvalue(),
             "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            "error_explanation": explain_freecad_error(str(exc)),
         }
