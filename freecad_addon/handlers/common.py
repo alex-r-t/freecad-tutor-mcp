@@ -10,6 +10,7 @@ from typing import Any, Iterator
 
 import FreeCAD
 
+from handlers.error_kb import explain_freecad_error
 from json_utils import sanitize_json
 
 try:
@@ -186,3 +187,54 @@ def undo_transaction(doc: Any, label: str, *, allow_during_dialog: bool = False)
         except Exception:
             pass
         raise
+
+
+def find_parent_body(doc: Any, obj: Any) -> Any:
+    """Return the PartDesign::Body that owns ``obj``, or None if standalone."""
+    for candidate in doc.Objects:
+        if candidate.TypeId == "PartDesign::Body" and obj in getattr(candidate, "Group", []):
+            return candidate
+    return None
+
+
+def resolve_origin_feature(body: Any, role_name: str) -> Any:
+    """Look up an Origin axis or plane by Role (multi-body safe in FreeCAD 1.x).
+
+    When a document has more than one Body, FreeCAD names the second Body's
+    Origin features ``XY_Plane001``, ``X_Axis001``, etc., while keeping their
+    ``Role`` property as ``XY_Plane`` / ``X_Axis``. Searching by ``Role`` first
+    avoids ``getObject('XY_Plane') -> None`` bugs on secondary Bodies.
+    """
+    origin = getattr(body, "Origin", None)
+    if origin is None:
+        return None
+    for feat in getattr(origin, "OriginFeatures", []) or []:
+        if getattr(feat, "Role", "") == role_name or getattr(feat, "Name", "") == role_name:
+            return feat
+    if hasattr(origin, "getObject"):
+        return origin.getObject(role_name)
+    return None
+
+
+def set_attachment_support(obj: Any, target: Any, sub: str = "", map_mode: str = "FlatFace") -> None:
+    """Attach a Sketch or Datum feature using FreeCAD 1.x AttachmentSupport (or 0.21 Support)."""
+    if hasattr(obj, "AttachmentSupport"):
+        obj.AttachmentSupport = [(target, sub)]
+    else:
+        obj.Support = (target, [sub])
+    if hasattr(obj, "MapMode"):
+        obj.MapMode = map_mode
+
+
+def verify_object_valid(obj: Any, action_label: str) -> None:
+    """Confirm a created/edited feature recomputed cleanly; raise to trigger rollback if invalid."""
+    state = list(obj.State) if hasattr(obj, "State") else []
+    valid = safe_is_valid(obj)
+    err_desc = safe_error_description(obj)
+    if valid is False or "Invalid" in state or "Error" in state:
+        detail = err_desc or f"state={state}"
+        explanation = explain_freecad_error(detail)
+        hint = f" Tutor hint: {explanation['summary']}" if explanation.get("matched") else ""
+        raise RuntimeError(
+            f"{action_label} produced an invalid feature '{obj.Name}' ({detail}); rolled back.{hint}"
+        )

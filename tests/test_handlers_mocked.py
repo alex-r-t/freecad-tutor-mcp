@@ -450,3 +450,137 @@ def test_list_documents_consistent_dict_shape(fake_freecad):
     fc.ActiveDocument = None
     zero = document.list_documents()
     assert zero == {"active_document": None, "count": 0, "documents": []}
+
+
+def test_edit_sketch_auto_constrain_polyline_and_constraint_updates(fake_freecad, monkeypatch: pytest.MonkeyPatch):
+    import sys
+
+    fc, _ = fake_freecad
+    _, _, sketcher, _, _, _, _, modeling, _ = _reload_handlers()
+
+    class FakeLineSegment:
+        def __init__(self, p1, p2):
+            self.StartPoint = p1
+            self.EndPoint = p2
+
+    class FakeCircle:
+        def __init__(self, center, normal, radius):
+            self.Center = center
+            self.Radius = radius
+
+    class FakeArcOfCircle:
+        def __init__(self, circle, a1, a2):
+            self.Center = circle.Center
+            self.Radius = circle.Radius
+            self.StartPoint = FakeVector(circle.Center.x + circle.Radius, circle.Center.y, 0.0)
+            self.EndPoint = FakeVector(circle.Center.x, circle.Center.y + circle.Radius, 0.0)
+
+    class FakeConstraint:
+        def __init__(self, *args):
+            self.Type = args[0]
+            self.Name = ""
+            self.First = args[1] if len(args) > 1 else -1
+            self.FirstPos = args[2] if len(args) > 2 else 0
+            self.Second = args[3] if len(args) > 3 else -1
+            self.SecondPos = args[4] if len(args) > 4 else 0
+            self.Third = -1
+            self.ThirdPos = 0
+            self.Driving = True
+            self.InVirtualSpace = False
+            self.IsActive = True
+            if self.Type in ("Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle"):
+                self.Value = args[-1]
+
+    fake_part = types.ModuleType("Part")
+    fake_part.LineSegment = FakeLineSegment
+    fake_part.Circle = FakeCircle
+    fake_part.ArcOfCircle = FakeArcOfCircle
+    fake_sketcher = types.ModuleType("Sketcher")
+    fake_sketcher.Constraint = FakeConstraint
+    monkeypatch.setitem(sys.modules, "Part", fake_part)
+    monkeypatch.setitem(sys.modules, "Sketcher", fake_sketcher)
+
+    doc = fc.ActiveDocument
+    sk = doc.addObject("Sketcher::SketchObject", "AutoSk")
+    sk.Geometry = []
+    sk.Constraints = []
+    sk.DoF = 0
+    sk.FullyConstrained = True
+
+    def _add_geo(g, construction=False):
+        g.Construction = construction
+        sk.Geometry.append(g)
+        sk.GeometryCount = len(sk.Geometry)
+        return len(sk.Geometry) - 1
+
+    def _add_con(c):
+        sk.Constraints.append(c)
+        sk.ConstraintCount = len(sk.Constraints)
+        return len(sk.Constraints) - 1
+
+    sk.GeometryCount = 0
+    sk.ConstraintCount = 0
+    sk.addGeometry = _add_geo
+    sk.addConstraint = _add_con
+    sk.renameConstraint = lambda idx, name: setattr(sk.Constraints[idx], "Name", name)
+    sk.setDatum = lambda idx, val: setattr(sk.Constraints[idx], "Value", val)
+    sk.setDriving = lambda idx, state: setattr(sk.Constraints[idx], "Driving", state)
+    sk.setActive = lambda idx, state: setattr(sk.Constraints[idx], "IsActive", state)
+    sk.delConstraints = lambda indices, update=True: [sk.Constraints.pop(i) for i in sorted(indices, reverse=True)]
+    sk.delGeometries = lambda indices: [sk.Geometry.pop(i) for i in sorted(indices, reverse=True)]
+
+    # Closed rectangle drawn from 4 separate lines with auto_constrain=True
+    res = modeling.edit_sketch(
+        "AutoSk",
+        geometries=[
+            {"type": "line", "start": [0, 0], "end": [20, 0]},
+            {"type": "line", "start": [20, 0], "end": [20, 10]},
+            {"type": "line", "start": [20, 10], "end": [0, 10]},
+            {"type": "line", "start": [0, 10], "end": [0, 0]},
+        ],
+        constraints=[{"type": "DistanceX", "first": 0, "value": 20.0, "name": "Width"}],
+        auto_constrain=True,
+    )
+    types_added = [c["type"] for c in res["auto_constraints_added"]]
+    assert types_added.count("Horizontal") == 2
+    assert types_added.count("Vertical") == 2
+    assert types_added.count("Coincident") == 4
+    assert res["fully_constrained"] is True
+
+    # Modify DistanceX by name, toggle reference, and delete an extra constraint
+    modeling.edit_sketch(
+        "AutoSk",
+        update_constraints=[{"name": "Width", "value": 35.0, "driving": False, "new_name": "RefWidth"}],
+        delete_constraint_indices=[0],
+    )
+    width_cons = [c for c in sk.Constraints if c.Name == "RefWidth"]
+    assert len(width_cons) == 1
+    assert width_cons[0].Value == 35.0
+    assert width_cons[0].Driving is False
+
+    # Diagnostics OpenVertices + missing constraints
+    sk.OpenVertices = [FakeVector(20.0, 0.0, 0.0)]
+    sk.detectMissingPointOnPointConstraints = lambda: 1
+    sk.detectMissingVerticalHorizontalConstraints = lambda: 2
+    sk.detectMissingEqualityConstraints = lambda: 0
+    diag = sketcher.get_sketch_diagnostics("AutoSk")
+    assert diag["open_vertex_count"] == 1
+    assert diag["missing_coincident_count"] == 1
+    assert diag["missing_hv_count"] == 2
+    assert any("open vertex" in h.lower() for h in diag["tutor_hints"])
+
+
+def test_error_kb_translations():
+    from handlers.error_kb import explain_freecad_error
+
+    fillet_exp = explain_freecad_error("Fillet not possible on selected shapes")
+    assert fillet_exp["matched"] is True
+    assert fillet_exp["code"] == "FILLET_CHAMFER_FAILED"
+    assert fillet_exp["how_to_fix"]
+
+    multi_exp = explain_freecad_error("Result has multiple solids. This is not supported at this time.")
+    assert multi_exp["code"] == "MULTIPLE_SOLIDS"
+
+    unknown = explain_freecad_error("Something completely unexpected")
+    assert unknown["matched"] is False
+    assert unknown["code"] == "UNKNOWN_FREECAD_ERROR"

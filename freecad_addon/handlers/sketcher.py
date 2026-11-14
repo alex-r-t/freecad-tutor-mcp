@@ -21,12 +21,49 @@ def get_sketch_diagnostics(name: str, doc_name: str = "") -> dict[str, Any]:
 
     redundant: list[int] = []
     conflicting: list[int] = []
+    malformed: list[int] = []
+    partially_redundant: list[int] = []
     try:
         redundant = list(sketch.getRedundantConstraints())
     except Exception:
         pass
     try:
         conflicting = list(sketch.getConflictingConstraints())
+    except Exception:
+        pass
+    try:
+        malformed = list(getattr(sketch, "MalformedConstraints", []))
+    except Exception:
+        pass
+    try:
+        partially_redundant = list(getattr(sketch, "PartiallyRedundantConstraints", []))
+    except Exception:
+        pass
+
+    # Built-in C++ Sketcher validation checks (OpenVertices & missing constraints).
+    open_vertices: list[list[float]] = []
+    for pt in getattr(sketch, "OpenVertices", []) or []:
+        try:
+            open_vertices.append(vec_to_list(pt))
+        except Exception:
+            pass
+
+    missing_coincident_count = 0
+    missing_hv_count = 0
+    missing_equality_count = 0
+    try:
+        if hasattr(sketch, "detectMissingPointOnPointConstraints"):
+            missing_coincident_count = int(sketch.detectMissingPointOnPointConstraints())
+    except Exception:
+        pass
+    try:
+        if hasattr(sketch, "detectMissingVerticalHorizontalConstraints"):
+            missing_hv_count = int(sketch.detectMissingVerticalHorizontalConstraints())
+    except Exception:
+        pass
+    try:
+        if hasattr(sketch, "detectMissingEqualityConstraints"):
+            missing_equality_count = int(sketch.detectMissingEqualityConstraints())
     except Exception:
         pass
 
@@ -100,6 +137,9 @@ def get_sketch_diagnostics(name: str, doc_name: str = "") -> dict[str, Any]:
         fully_constrained=fully_constrained,
         redundant=redundant,
         conflicting=conflicting,
+        open_vertices=open_vertices,
+        missing_coincident_count=missing_coincident_count,
+        missing_hv_count=missing_hv_count,
         geometries=geometries,
     )
 
@@ -114,6 +154,13 @@ def get_sketch_diagnostics(name: str, doc_name: str = "") -> dict[str, Any]:
         "fully_constrained": fully_constrained,
         "redundant_indices": redundant,
         "conflicting_indices": conflicting,
+        "malformed_indices": malformed,
+        "partially_redundant_indices": partially_redundant,
+        "open_vertex_count": len(open_vertices),
+        "open_vertices": open_vertices,
+        "missing_coincident_count": missing_coincident_count,
+        "missing_hv_count": missing_hv_count,
+        "missing_equality_count": missing_equality_count,
         "constraints": constraints,
         "geometries": geometries,
         "tutor_hints": tutor_hints,
@@ -127,9 +174,26 @@ def _build_tutor_hints(
     fully_constrained: Any,
     redundant: list[int],
     conflicting: list[int],
+    open_vertices: list[list[float]],
+    missing_coincident_count: int,
+    missing_hv_count: int,
     geometries: list[dict[str, Any]],
 ) -> list[str]:
     hints: list[str] = []
+    if open_vertices:
+        hints.append(
+            f"Found {len(open_vertices)} open vertex/vertices (e.g., near {open_vertices[0]}): "
+            "Pad/Pocket/Revolve require a closed loop—add Coincident constraints at unconnected endpoints."
+        )
+    if missing_coincident_count:
+        hints.append(
+            f"Detected {missing_coincident_count} endpoint pair(s) touching without a Coincident constraint; "
+            "run Sketcher -> Validate sketch or constrain the corners together."
+        )
+    if missing_hv_count:
+        hints.append(
+            f"Detected {missing_hv_count} nearly horizontal/vertical line(s) missing Horizontal/Vertical constraints."
+        )
     if conflicting:
         hints.append(
             f"Conflicting constraints at indices {conflicting}: delete or convert one to a reference (blue) constraint."

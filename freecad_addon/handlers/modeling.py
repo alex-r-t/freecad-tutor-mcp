@@ -15,40 +15,20 @@ from typing import Any
 import FreeCAD
 
 from handlers.common import (
+    find_parent_body,
     resolve_doc,
+    resolve_origin_feature,
     safe_error_description,
     safe_is_valid,
+    set_attachment_support,
     undo_transaction,
+    verify_object_valid,
 )
 
-
-def _find_parent_body(doc: Any, obj: Any) -> Any:
-    """Find the PartDesign::Body that owns `obj`, or return None."""
-    for candidate in doc.Objects:
-        if candidate.TypeId == "PartDesign::Body" and obj in getattr(candidate, "Group", []):
-            return candidate
-    return None
-
-
-def _verify_object_valid(obj: Any, action_label: str) -> None:
-    """Confirm a created/edited feature recomputed cleanly; raise to trigger rollback if invalid."""
-    state = list(obj.State) if hasattr(obj, "State") else []
-    valid = safe_is_valid(obj)
-    err_desc = safe_error_description(obj)
-    if valid is False or "Invalid" in state or "Error" in state:
-        detail = err_desc or f"state={state}"
-        raise RuntimeError(
-            f"{action_label} produced an invalid feature '{obj.Name}' ({detail}); rolled back."
-        )
-
-
-def _set_attachment_support(obj: Any, target: Any, sub: str = "") -> None:
-    """Attach a Sketch or Feature using FreeCAD 1.x AttachmentSupport (or 0.21 Support)."""
-    if hasattr(obj, "AttachmentSupport"):
-        obj.AttachmentSupport = [(target, sub)]
-    else:
-        obj.Support = (target, [sub])
-    obj.MapMode = "FlatFace"
+# Preserve backward-compatible private aliases if any external script imports them.
+_find_parent_body = find_parent_body
+_verify_object_valid = verify_object_valid
+_set_attachment_support = set_attachment_support
 
 
 # ── Undo / Redo ──────────────────────────────────────────────────────────
@@ -127,13 +107,16 @@ def create_sketch(
                 raise ValueError(f"Body not found: {body_name}")
             sketch = body.newObject("Sketcher::SketchObject", sketch_name)
             if plane in ("XY_Plane", "XZ_Plane", "YZ_Plane"):
-                plane_obj = body.Origin.getObject(plane)
-                _set_attachment_support(sketch, plane_obj, "")
+                plane_obj = resolve_origin_feature(body, plane)
+                set_attachment_support(sketch, plane_obj, "")
             elif plane.startswith("Face"):
-                _set_attachment_support(sketch, body, plane)
+                set_attachment_support(sketch, body, plane)
+            elif doc.getObject(plane) is not None:
+                datum_target = doc.getObject(plane)
+                set_attachment_support(sketch, datum_target, "")
             else:
                 raise ValueError(
-                    f"Unsupported plane '{plane}'. Use XY_Plane, XZ_Plane, YZ_Plane, or FaceN."
+                    f"Unsupported plane '{plane}'. Use XY_Plane, XZ_Plane, YZ_Plane, FaceN, or a DatumPlane name."
                 )
         else:
             sketch = doc.addObject("Sketcher::SketchObject", sketch_name)
@@ -164,13 +147,259 @@ def _to_vector(pt: list[float] | tuple[float, ...]) -> Any:
     return FreeCAD.Vector(float(pt[0]), float(pt[1]), float(pt[2]))
 
 
+_SKETCH_AUTO_TOL = 1e-6
+
+
+def _point_2d_key(pt: Any) -> tuple[float, float]:
+    """Normalize a FreeCAD Vector/tuple onto a 1e-6 mm grid key for endpoint matching."""
+    if hasattr(pt, "x"):
+        return (round(float(pt.x), 6), round(float(pt.y), 6))
+    return (round(float(pt[0]), 6), round(float(pt[1]), 6))
+
+
+def _dist_2d(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _snapshot_sketch_endpoints(sketch: Any) -> list[tuple[int, int, tuple[float, float]]]:
+    """Collect (geo_idx, point_pos, (x, y)) for existing open-curve endpoints (StartPoint/EndPoint)."""
+    endpoints: list[tuple[int, int, tuple[float, float]]] = []
+    for idx, geo in enumerate(getattr(sketch, "Geometry", []) or []):
+        if hasattr(geo, "StartPoint") and hasattr(geo, "EndPoint"):
+            endpoints.append((idx, 1, _point_2d_key(geo.StartPoint)))
+            endpoints.append((idx, 2, _point_2d_key(geo.EndPoint)))
+    return endpoints
+
+
+def _existing_coincident_pairs(sketch: Any) -> set[tuple[tuple[int, int], tuple[int, int]]]:
+    """Return canonical pairs ((geoA, posA), (geoB, posB)) already joined by Coincident."""
+    pairs: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for con in getattr(sketch, "Constraints", []) or []:
+        if getattr(con, "Type", "") == "Coincident":
+            a = (int(con.First), int(con.FirstPos))
+            b = (int(con.Second), int(con.SecondPos))
+            pairs.add((min(a, b), max(a, b)))
+    return pairs
+
+
+def _apply_auto_coincident(
+    sketch: Any,
+    Sketcher: Any,
+    existing_endpoints: list[tuple[int, int, tuple[float, float]]],
+    new_endpoints: list[tuple[int, int, tuple[float, float]]],
+) -> list[dict[str, Any]]:
+    """Add Coincident constraints between matching newly added and pre-existing endpoints.
+
+    Uses a cluster-representative strategy so N edges meeting at one corner get
+    N-1 Coincident constraints (a minimal spanning chain) instead of redundant cycles.
+    """
+    added: list[dict[str, Any]] = []
+    seen_pairs = _existing_coincident_pairs(sketch)
+    # Seed representatives with pre-existing endpoints first so new segments snap onto existing ones.
+    clusters: list[tuple[int, int, tuple[float, float]]] = list(existing_endpoints)
+
+    for geo_idx, pos, xy in new_endpoints:
+        matched_rep: tuple[int, int, tuple[float, float]] | None = None
+        for rep in clusters:
+            if rep[0] == geo_idx and rep[1] == pos:
+                continue
+            if _dist_2d(xy, rep[2]) <= _SKETCH_AUTO_TOL:
+                matched_rep = rep
+                break
+
+        if matched_rep is None:
+            clusters.append((geo_idx, pos, xy))
+            continue
+
+        a = (matched_rep[0], matched_rep[1])
+        b = (geo_idx, pos)
+        if a[0] == b[0] and a[1] == b[1]:
+            continue
+        pair_key = (min(a, b), max(a, b))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+        con_idx = sketch.addConstraint(Sketcher.Constraint("Coincident", a[0], a[1], b[0], b[1]))
+        added.append({
+            "index": con_idx,
+            "type": "Coincident",
+            "first": a[0],
+            "first_pos": a[1],
+            "second": b[0],
+            "second_pos": b[1],
+        })
+    return added
+
+
+def _resolve_constraint_index(sketch: Any, spec: dict[str, Any]) -> int:
+    """Resolve a constraint index from either explicit 'index' or constraint 'name'."""
+    if spec.get("index") is not None:
+        return int(spec["index"])
+    target_name = str(spec.get("name", "")).strip()
+    if not target_name:
+        raise ValueError("Constraint update requires either 'index' or 'name'")
+    for idx, con in enumerate(getattr(sketch, "Constraints", []) or []):
+        if getattr(con, "Name", "") == target_name:
+            return idx
+    raise ValueError(f"Constraint named '{target_name}' not found in sketch '{sketch.Name}'")
+
+
+def _build_rectangle_geometry(
+    sketch: Any,
+    Part: Any,
+    Sketcher: Any,
+    geo_spec: dict[str, Any],
+    construction: bool,
+) -> list[int]:
+    """Create 4 connected LineSegments forming a rectangle with Coincident/H/V constraints."""
+    x = float(geo_spec.get("x", 0.0))
+    y = float(geo_spec.get("y", 0.0))
+    width = float(geo_spec["width"])
+    height = float(geo_spec["height"])
+    corners = [
+        FreeCAD.Vector(x, y, 0.0),
+        FreeCAD.Vector(x + width, y, 0.0),
+        FreeCAD.Vector(x + width, y + height, 0.0),
+        FreeCAD.Vector(x, y + height, 0.0),
+    ]
+    i0 = sketch.addGeometry(Part.LineSegment(corners[0], corners[1]), construction)
+    i1 = sketch.addGeometry(Part.LineSegment(corners[1], corners[2]), construction)
+    i2 = sketch.addGeometry(Part.LineSegment(corners[2], corners[3]), construction)
+    i3 = sketch.addGeometry(Part.LineSegment(corners[3], corners[0]), construction)
+    # Close the 4 corners and enforce axis alignment just like FreeCAD's Rectangle tool.
+    sketch.addConstraint(Sketcher.Constraint("Coincident", i0, 2, i1, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", i1, 2, i2, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", i2, 2, i3, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", i3, 2, i0, 1))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", i0))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", i2))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", i1))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", i3))
+    return [i0, i1, i2, i3]
+
+
+def _build_slot_geometry(
+    sketch: Any,
+    Part: Any,
+    Sketcher: Any,
+    geo_spec: dict[str, Any],
+    construction: bool,
+) -> list[int]:
+    """Create a stadium slot along [start -> end] with radius (or width / 2)."""
+    p1 = _to_vector(geo_spec["start"])
+    p2 = _to_vector(geo_spec["end"])
+    radius = float(geo_spec["radius"]) if "radius" in geo_spec else float(geo_spec["width"]) / 2.0
+    if radius <= 0:
+        raise ValueError("Slot radius/width must be positive")
+    dx = p2.x - p1.x
+    dy = p2.y - p1.y
+    seg_len = math.hypot(dx, dy)
+    if seg_len < 1e-9:
+        raise ValueError("Slot start and end points must be distinct")
+
+    ux, uy = dx / seg_len, dy / seg_len
+    nx, ny = -uy * radius, ux * radius  # Left-hand perpendicular offset
+
+    top_start = FreeCAD.Vector(p1.x + nx, p1.y + ny, 0.0)
+    top_end = FreeCAD.Vector(p2.x + nx, p2.y + ny, 0.0)
+    bot_end = FreeCAD.Vector(p2.x - nx, p2.y - ny, 0.0)
+    bot_start = FreeCAD.Vector(p1.x - nx, p1.y - ny, 0.0)
+
+    base_angle = math.atan2(dy, dx)
+    arc1 = Part.ArcOfCircle(
+        Part.Circle(p1, FreeCAD.Vector(0, 0, 1), radius),
+        base_angle + math.pi / 2.0,
+        base_angle + 3.0 * math.pi / 2.0,
+    )
+    arc2 = Part.ArcOfCircle(
+        Part.Circle(p2, FreeCAD.Vector(0, 0, 1), radius),
+        base_angle - math.pi / 2.0,
+        base_angle + math.pi / 2.0,
+    )
+
+    i_top = sketch.addGeometry(Part.LineSegment(top_start, top_end), construction)
+    i_arc2 = sketch.addGeometry(arc2, construction)
+    i_bot = sketch.addGeometry(Part.LineSegment(bot_end, bot_start), construction)
+    i_arc1 = sketch.addGeometry(arc1, construction)
+
+    sketch.addConstraint(Sketcher.Constraint("Tangent", i_top, 2, i_arc2, 2))
+    sketch.addConstraint(Sketcher.Constraint("Tangent", i_arc2, 1, i_bot, 1))
+    sketch.addConstraint(Sketcher.Constraint("Tangent", i_bot, 2, i_arc1, 2))
+    sketch.addConstraint(Sketcher.Constraint("Tangent", i_arc1, 1, i_top, 1))
+    sketch.addConstraint(Sketcher.Constraint("Equal", i_arc1, i_arc2))
+    return [i_top, i_arc2, i_bot, i_arc1]
+
+
+def _build_polygon_geometry(
+    sketch: Any,
+    Part: Any,
+    Sketcher: Any,
+    geo_spec: dict[str, Any],
+    construction: bool,
+    auto_constrain: bool,
+) -> list[int]:
+    """Create an N-sided regular polygon centered at `center`."""
+    sides = int(geo_spec.get("sides", 6))
+    if sides < 3:
+        raise ValueError("Polygon must have at least 3 sides")
+    center = _to_vector(geo_spec.get("center", [0.0, 0.0]))
+    radius = float(geo_spec["radius"])
+    if geo_spec.get("inscribed", False):
+        radius = radius / math.cos(math.pi / sides)
+    angle0 = math.radians(float(geo_spec.get("angle_deg", 0.0)))
+
+    pts = [
+        FreeCAD.Vector(
+            center.x + radius * math.cos(angle0 + 2.0 * math.pi * k / sides),
+            center.y + radius * math.sin(angle0 + 2.0 * math.pi * k / sides),
+            0.0,
+        )
+        for k in range(sides)
+    ]
+    indices: list[int] = []
+    for k in range(sides):
+        idx = sketch.addGeometry(Part.LineSegment(pts[k], pts[(k + 1) % sides]), construction)
+        indices.append(idx)
+
+    if auto_constrain:
+        for k in range(sides):
+            nxt = (k + 1) % sides
+            sketch.addConstraint(Sketcher.Constraint("Coincident", indices[k], 2, indices[nxt], 1))
+        for k in range(1, sides):
+            sketch.addConstraint(Sketcher.Constraint("Equal", indices[0], indices[k]))
+    return indices
+
+
 def edit_sketch(
     sketch_name: str,
     geometries: list[dict[str, Any]] | None = None,
     constraints: list[dict[str, Any]] | None = None,
+    auto_constrain: bool = True,
+    update_constraints: list[dict[str, Any]] | None = None,
+    delete_constraint_indices: list[int] | None = None,
+    delete_geometry_indices: list[int] | None = None,
+    external_geometries: list[dict[str, Any]] | None = None,
+    toggle_construction: list[int] | None = None,
+    fillet_corners: list[dict[str, Any]] | None = None,
     doc_name: str = "",
 ) -> dict[str, Any]:
-    """Add geometry elements (line, rectangle, circle, arc) and constraints to a Sketch."""
+    """Modify a Sketch: add/edit/delete geometry and constraints with optional auto-constraining.
+
+    Args:
+        sketch_name: Target Sketcher::SketchObject name.
+        geometries: List of shapes (`line`, `polyline`, `rectangle`, `circle`, `arc`, `slot`, `polygon`).
+        constraints: List of Sketcher constraints to add (`Distance`, `Coincident`, `Horizontal`, etc.).
+        auto_constrain: When True (default), automatically adds Coincident constraints between
+            matching endpoints and Horizontal/Vertical constraints on axis-aligned lines/polylines.
+        update_constraints: List of dicts to modify existing constraints by `index` or `name`
+            (`value` in mm or degrees for Angle, `new_name`, `driving`, `active`).
+        delete_constraint_indices: Zero-based constraint indices to delete (sorted descending safely).
+        delete_geometry_indices: Zero-based geometry indices to delete.
+        external_geometries: List of `{"object": str, "subelement": str, "defining": bool?}` for `addExternal`.
+        toggle_construction: List of geometry indices to toggle between construction (blue) and normal.
+        fillet_corners: List of corner fillet specs `{"geo1", "geo2", "point1", "point2", "radius"}`.
+        doc_name: Target document name (empty string uses ActiveDocument).
+    """
     import Part
     import Sketcher
 
@@ -183,8 +412,45 @@ def edit_sketch(
 
     added_geo: list[int] = []
     added_con: list[int] = []
+    auto_added: list[dict[str, Any]] = []
+    updated_con: list[int] = []
 
     with undo_transaction(doc, f"Edit {sketch.Name}"):
+        # 1. External geometry references (before adding constraints that reference them)
+        for ext in external_geometries or []:
+            obj_ref = str(ext["object"])
+            sub_ref = str(ext["subelement"])
+            if "defining" in ext or "intersection" in ext:
+                sketch.addExternal(
+                    obj_ref,
+                    sub_ref,
+                    bool(ext.get("defining", False)),
+                    bool(ext.get("intersection", False)),
+                )
+            else:
+                sketch.addExternal(obj_ref, sub_ref)
+
+        # 2. Delete requested geometry/constraints before adding new ones so indices stay predictable.
+        if delete_constraint_indices:
+            sorted_cons = sorted({int(i) for i in delete_constraint_indices}, reverse=True)
+            if hasattr(sketch, "delConstraints"):
+                try:
+                    sketch.delConstraints(sorted_cons, True)
+                except TypeError:
+                    sketch.delConstraints(sorted_cons)
+            else:
+                for idx in sorted_cons:
+                    sketch.delConstraint(idx)
+
+        if delete_geometry_indices:
+            sorted_geos = sorted({int(i) for i in delete_geometry_indices}, reverse=True)
+            sketch.delGeometries(sorted_geos)
+
+        # Snapshot pre-existing endpoints so new lines can auto-join to existing geometry.
+        existing_endpoints = _snapshot_sketch_endpoints(sketch) if auto_constrain else []
+        new_endpoints: list[tuple[int, int, tuple[float, float]]] = []
+
+        # 3. Add geometries
         for geo_spec in geometries or []:
             kind = str(geo_spec.get("type", "")).lower()
             construction = bool(geo_spec.get("construction", False))
@@ -194,6 +460,49 @@ def edit_sketch(
                 p2 = _to_vector(geo_spec["end"])
                 idx = sketch.addGeometry(Part.LineSegment(p1, p2), construction)
                 added_geo.append(idx)
+                if auto_constrain:
+                    new_endpoints.append((idx, 1, _point_2d_key(p1)))
+                    new_endpoints.append((idx, 2, _point_2d_key(p2)))
+                    dx, dy = abs(p2.x - p1.x), abs(p2.y - p1.y)
+                    if dy <= _SKETCH_AUTO_TOL and dx > _SKETCH_AUTO_TOL:
+                        c_idx = sketch.addConstraint(Sketcher.Constraint("Horizontal", idx))
+                        auto_added.append({"index": c_idx, "type": "Horizontal", "first": idx})
+                    elif dx <= _SKETCH_AUTO_TOL and dy > _SKETCH_AUTO_TOL:
+                        c_idx = sketch.addConstraint(Sketcher.Constraint("Vertical", idx))
+                        auto_added.append({"index": c_idx, "type": "Vertical", "first": idx})
+
+            elif kind == "polyline":
+                raw_pts = geo_spec.get("points") or []
+                if len(raw_pts) < 2:
+                    raise ValueError("Polyline requires at least 2 points")
+                pts = [_to_vector(p) for p in raw_pts]
+                closed = bool(geo_spec.get("closed", False))
+                seg_pairs = [(pts[k], pts[k + 1]) for k in range(len(pts) - 1)]
+                if closed and len(pts) >= 3:
+                    seg_pairs.append((pts[-1], pts[0]))
+
+                seg_indices: list[int] = []
+                for p1, p2 in seg_pairs:
+                    idx = sketch.addGeometry(Part.LineSegment(p1, p2), construction)
+                    added_geo.append(idx)
+                    seg_indices.append(idx)
+                    if auto_constrain:
+                        new_endpoints.append((idx, 1, _point_2d_key(p1)))
+                        new_endpoints.append((idx, 2, _point_2d_key(p2)))
+                        dx, dy = abs(p2.x - p1.x), abs(p2.y - p1.y)
+                        if dy <= _SKETCH_AUTO_TOL and dx > _SKETCH_AUTO_TOL:
+                            c_idx = sketch.addConstraint(Sketcher.Constraint("Horizontal", idx))
+                            auto_added.append({"index": c_idx, "type": "Horizontal", "first": idx})
+                        elif dx <= _SKETCH_AUTO_TOL and dy > _SKETCH_AUTO_TOL:
+                            c_idx = sketch.addConstraint(Sketcher.Constraint("Vertical", idx))
+                            auto_added.append({"index": c_idx, "type": "Vertical", "first": idx})
+                    else:
+                        # Even when auto_constrain=False, a polyline's sequential vertices stay joined.
+                        if len(seg_indices) > 1:
+                            prev_idx = seg_indices[-2]
+                            sketch.addConstraint(Sketcher.Constraint("Coincident", prev_idx, 2, idx, 1))
+                if not auto_constrain and closed and len(seg_indices) >= 3:
+                    sketch.addConstraint(Sketcher.Constraint("Coincident", seg_indices[-1], 2, seg_indices[0], 1))
 
             elif kind == "circle":
                 center = _to_vector(geo_spec["center"])
@@ -203,30 +512,7 @@ def edit_sketch(
                 added_geo.append(idx)
 
             elif kind == "rectangle":
-                x = float(geo_spec.get("x", 0.0))
-                y = float(geo_spec.get("y", 0.0))
-                width = float(geo_spec["width"])
-                height = float(geo_spec["height"])
-                corners = [
-                    FreeCAD.Vector(x, y, 0.0),
-                    FreeCAD.Vector(x + width, y, 0.0),
-                    FreeCAD.Vector(x + width, y + height, 0.0),
-                    FreeCAD.Vector(x, y + height, 0.0),
-                ]
-                i0 = sketch.addGeometry(Part.LineSegment(corners[0], corners[1]), construction)
-                i1 = sketch.addGeometry(Part.LineSegment(corners[1], corners[2]), construction)
-                i2 = sketch.addGeometry(Part.LineSegment(corners[2], corners[3]), construction)
-                i3 = sketch.addGeometry(Part.LineSegment(corners[3], corners[0]), construction)
-                added_geo.extend([i0, i1, i2, i3])
-                # Close the 4 corners and enforce axis alignment just like FreeCAD's Rectangle tool.
-                sketch.addConstraint(Sketcher.Constraint("Coincident", i0, 2, i1, 1))
-                sketch.addConstraint(Sketcher.Constraint("Coincident", i1, 2, i2, 1))
-                sketch.addConstraint(Sketcher.Constraint("Coincident", i2, 2, i3, 1))
-                sketch.addConstraint(Sketcher.Constraint("Coincident", i3, 2, i0, 1))
-                sketch.addConstraint(Sketcher.Constraint("Horizontal", i0))
-                sketch.addConstraint(Sketcher.Constraint("Horizontal", i2))
-                sketch.addConstraint(Sketcher.Constraint("Vertical", i1))
-                sketch.addConstraint(Sketcher.Constraint("Vertical", i3))
+                added_geo.extend(_build_rectangle_geometry(sketch, Part, Sketcher, geo_spec, construction))
 
             elif kind == "arc":
                 center = _to_vector(geo_spec["center"])
@@ -237,10 +523,41 @@ def edit_sketch(
                 arc = Part.ArcOfCircle(circle, start_rad, end_rad)
                 idx = sketch.addGeometry(arc, construction)
                 added_geo.append(idx)
+                if auto_constrain and hasattr(arc, "StartPoint") and hasattr(arc, "EndPoint"):
+                    new_endpoints.append((idx, 1, _point_2d_key(arc.StartPoint)))
+                    new_endpoints.append((idx, 2, _point_2d_key(arc.EndPoint)))
+
+            elif kind == "slot":
+                added_geo.extend(_build_slot_geometry(sketch, Part, Sketcher, geo_spec, construction))
+
+            elif kind == "polygon":
+                added_geo.extend(
+                    _build_polygon_geometry(sketch, Part, Sketcher, geo_spec, construction, auto_constrain)
+                )
 
             else:
                 raise ValueError(f"Unsupported sketch geometry type: '{kind}'")
 
+        # Auto-join touching endpoints for newly drawn lines/polylines/arcs.
+        if auto_constrain and new_endpoints:
+            auto_added.extend(
+                _apply_auto_coincident(sketch, Sketcher, existing_endpoints, new_endpoints)
+            )
+
+        # 4. Toggle construction mode on requested geometry indices
+        for idx in toggle_construction or []:
+            sketch.toggleConstruction(int(idx))
+
+        # 5. Corner fillets between sketch lines
+        for fillet_spec in fillet_corners or []:
+            g1 = int(fillet_spec["geo1"])
+            g2 = int(fillet_spec["geo2"])
+            pt1 = _to_vector(fillet_spec["point1"])
+            pt2 = _to_vector(fillet_spec["point2"])
+            radius = float(fillet_spec["radius"])
+            sketch.fillet(g1, g2, pt1, pt2, radius)
+
+        # 6. Add explicit new constraints
         for con_spec in constraints or []:
             ctype = con_spec["type"]
             args: list[Any] = [ctype]
@@ -248,17 +565,46 @@ def edit_sketch(
                 if key in con_spec and con_spec[key] is not None:
                     args.append(con_spec[key])
             if "value" in con_spec and con_spec["value"] is not None:
-                args.append(float(con_spec["value"]))
+                val = float(con_spec["value"])
+                if ctype == "Angle" and not con_spec.get("is_radians", False):
+                    val = math.radians(val)
+                args.append(val)
             idx = sketch.addConstraint(Sketcher.Constraint(*args))
+            if con_spec.get("name") and hasattr(sketch, "renameConstraint"):
+                sketch.renameConstraint(idx, str(con_spec["name"]))
             added_con.append(idx)
+
+        # 7. Modify existing constraints (dimension datum, name, driving/reference, active)
+        for upd in update_constraints or []:
+            c_idx = _resolve_constraint_index(sketch, upd)
+            updated_con.append(c_idx)
+            con_obj = sketch.Constraints[c_idx]
+            if upd.get("value") is not None:
+                val = float(upd["value"])
+                if getattr(con_obj, "Type", "") == "Angle" and not upd.get("is_radians", False):
+                    val = math.radians(val)
+                sketch.setDatum(c_idx, val)
+            if upd.get("driving") is not None:
+                sketch.setDriving(c_idx, bool(upd["driving"]))
+            if upd.get("active") is not None:
+                sketch.setActive(c_idx, bool(upd["active"]))
+            if upd.get("new_name"):
+                sketch.renameConstraint(c_idx, str(upd["new_name"]))
+
+    dof = getattr(sketch, "DoF", None)
+    fully_constrained = getattr(sketch, "FullyConstrained", None)
+    if fully_constrained is None and isinstance(dof, int):
+        fully_constrained = dof == 0
 
     return {
         "document": doc.Name,
         "sketch": sketch.Name,
         "added_geometry_indices": added_geo,
         "added_constraint_indices": added_con,
-        "degrees_of_freedom": getattr(sketch, "DoF", None),
-        "fully_constrained": getattr(sketch, "FullyConstrained", None),
+        "auto_constraints_added": auto_added,
+        "updated_constraint_indices": updated_con,
+        "degrees_of_freedom": dof,
+        "fully_constrained": fully_constrained,
     }
 
 
