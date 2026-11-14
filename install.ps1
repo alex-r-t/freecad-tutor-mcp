@@ -301,7 +301,9 @@ with open(config_path, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n")
 '@
 
-    & $VenvPython -c $PatchScript $ClaudeConfigPath $ServerExe
+    # Pass via Base64 because Windows PowerShell 5.1 strips double quotes when forwarding strings to native EXEs.
+    $PatchB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($PatchScript))
+    & $VenvPython -c "import base64, sys; exec(base64.b64decode(sys.argv.pop(1)).decode('utf-8'))" $PatchB64 $ClaudeConfigPath $ServerExe
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to update $ClaudeConfigPath"
     }
