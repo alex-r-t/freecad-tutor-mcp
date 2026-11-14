@@ -96,7 +96,23 @@ def _build_face_info(i: int, face: Any) -> dict[str, Any]:
     face_info["surface_type"] = surface_type
 
     if surface_type == "Plane":
-        face_info["normal"] = vec_to_list(surface.Axis)
+        # `surface.Axis` ignores face Orientation ('Reversed' vs 'Forward'), so both
+        # +Z and -Z faces can report (0, 0, 1). `face.normalAt(u, v)` returns the
+        # true outward normal of the solid face.
+        normal_vec = None
+        if hasattr(face, "normalAt") and hasattr(face, "ParameterRange"):
+            try:
+                u0, u1, v0, v1 = face.ParameterRange
+                normal_vec = vec_to_list(face.normalAt((u0 + u1) / 2.0, (v0 + v1) / 2.0))
+            except Exception:
+                normal_vec = None
+        if normal_vec is None:
+            raw_axis = vec_to_list(surface.Axis)
+            if getattr(face, "Orientation", "Forward") == "Reversed":
+                normal_vec = [-c for c in raw_axis]
+            else:
+                normal_vec = raw_axis
+        face_info["normal"] = normal_vec
         face_info["position"] = vec_to_list(surface.Position)
     elif surface_type == "Cylinder":
         face_info["axis"] = vec_to_list(surface.Axis)
