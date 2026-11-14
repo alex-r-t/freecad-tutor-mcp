@@ -1,5 +1,9 @@
 # FreeCAD Tutor MCP
 
+This is a completely vibe-coded MCP server to help my brother learn FreeCAD with Claude as an interactive tutor. Pretty much everything else below this sentence is AI-generated.
+
+---
+
 A tutor-focused **Model Context Protocol (MCP)** server and FreeCAD workbench built for learning **FreeCAD 1.0 / 1.1+** with **Claude Desktop on Windows**.
 
 It combines:
