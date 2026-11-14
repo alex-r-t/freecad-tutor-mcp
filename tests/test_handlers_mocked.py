@@ -584,3 +584,157 @@ def test_error_kb_translations():
     unknown = explain_freecad_error("Something completely unexpected")
     assert unknown["matched"] is False
     assert unknown["code"] == "UNKNOWN_FREECAD_ERROR"
+
+
+def test_camera_set_view_and_window_capture(fake_freecad, monkeypatch: pytest.MonkeyPatch):
+    fc, gui = fake_freecad
+    _, _, _, _, _, _, viewport, _, _ = _reload_handlers()
+
+    called: list[str] = []
+    fake_view = types.SimpleNamespace(
+        viewIsometric=lambda: called.append("iso"),
+        viewTop=lambda: called.append("top"),
+        fitAll=lambda: called.append("fit"),
+        getSize=lambda: (1600, 1200),
+        saveImage=lambda path, w, h, bg: None,
+    )
+    gui._active_view = fake_view
+    gui.runCommand = lambda name: called.append(name)
+
+    # Empty selection + zoom_to_selection raises clearly
+    with pytest.raises(ValueError, match="zoom_to_selection"):
+        viewport.set_view(view_name="Top", zoom_to_selection=True)
+
+    gui.Selection.addSelection("CoursePart", "Pad", "")
+    res = viewport.set_view(view_name="iso", zoom_to_selection=True)
+    assert res["view_name"] == "Isometric"
+    assert "iso" in called
+    assert "Std_ViewFitSelection" in called
+
+    # Window screenshot path with fake Qt
+    class _FakeByteArray:
+        def __init__(self):
+            self.data = b""
+
+        def __bytes__(self):
+            return b"\x89PNG\r\n\x1a\nfakewin"
+
+    class _FakeQBuffer:
+        def __init__(self, ba):
+            self.ba = ba
+
+        def open(self, mode):
+            return True
+
+        def close(self):
+            return None
+
+    class _FakePixmap:
+        def __init__(self, w=1600, h=1000):
+            self._w, self._h = w, h
+
+        def isNull(self):
+            return False
+
+        def width(self):
+            return self._w
+
+        def height(self):
+            return self._h
+
+        def scaled(self, w, h, aspect, mode):
+            return _FakePixmap(w, h)
+
+        def save(self, qbuf, fmt):
+            return True
+
+    fake_qt_core = types.SimpleNamespace(
+        QByteArray=_FakeByteArray,
+        QBuffer=_FakeQBuffer,
+        QIODevice=types.SimpleNamespace(WriteOnly=1),
+        Qt=types.SimpleNamespace(KeepAspectRatio=1, SmoothTransformation=1),
+    )
+    fake_qt_gui = types.SimpleNamespace(
+        QGuiApplication=types.SimpleNamespace(
+            primaryScreen=lambda: types.SimpleNamespace(grabWindow=lambda wid: _FakePixmap())
+        )
+    )
+    gui._main_window = types.SimpleNamespace(winId=lambda: 123, grab=lambda: _FakePixmap())
+    monkeypatch.setattr(viewport, "_import_qt_gui", lambda: (fake_qt_core, fake_qt_gui, None))
+
+    win_shot = viewport.get_view(view_name="Current", capture_scope="window")
+    assert win_shot["capture_scope"] == "window"
+    assert win_shot["width"] == 1280
+    assert win_shot["format"] == "png"
+
+
+def test_document_lifecycle_save_open_close_export_and_body_tips(
+    fake_freecad, monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    import sys
+
+    fc, _ = fake_freecad
+    document, _, _, _, _, _, _, _, _ = _reload_handlers()
+
+    doc = fc.ActiveDocument
+    doc._saved = False
+    body = doc.addObject("PartDesign::Body", "Body")
+    pad = doc.addObject("PartDesign::Pad", "Pad")
+    pad.Shape = types.SimpleNamespace(isNull=lambda: False)
+    body.Tip = pad
+    body.Shape = types.SimpleNamespace(isNull=lambda: False)
+
+    # Error object includes error_explanation, and body_tips records Pad
+    broken = doc.addObject("PartDesign::Fillet", "Fillet")
+    broken._valid = False
+    broken.State = ["Invalid"]
+    broken._error_desc = "Fillet not possible on selected shapes"
+    graph = document.get_document_graph()
+    assert graph["body_tips"] == {"Body": "Pad"}
+    assert graph["objects"]["Fillet"]["error_explanation"]["code"] == "FILLET_CHAMFER_FAILED"
+
+    # Closing unsaved doc without confirmation fails
+    with pytest.raises(RuntimeError, match="unsaved changes"):
+        document.close_document()
+
+    # SaveAs adds .FCStd and clears modified flag
+    fc_path = tmp_path / "demo_part"
+    doc.saveAs = lambda p: (setattr(doc, "FileName", p), setattr(doc, "_saved", True))
+    doc.save = lambda: setattr(doc, "_saved", True)
+    saved = document.save_document(path=str(fc_path))
+    assert saved["file_name"].endswith(".FCStd")
+
+    # Export STEP & STL via fake Part / Mesh
+    exported_calls: list[tuple[str, list[str], str]] = []
+    fake_part = types.ModuleType("Part")
+    fake_part.export = lambda objs, p: (
+        exported_calls.append(("step", [o.Name for o in objs], p)),
+        open(p, "wb").write(b"ISO-10303-21;"),
+    )
+    fake_mesh = types.ModuleType("Mesh")
+    fake_mesh.export = lambda objs, p: (
+        exported_calls.append(("stl", [o.Name for o in objs], p)),
+        open(p, "wb").write(b"solid"),
+    )
+    monkeypatch.setitem(sys.modules, "Part", fake_part)
+    monkeypatch.setitem(sys.modules, "Mesh", fake_mesh)
+
+    step_res = document.export_document(str(tmp_path / "out.step"))
+    stl_res = document.export_document(str(tmp_path / "out.stl"))
+    assert step_res["object_names"] == ["Body"]
+    assert stl_res["format"] == "stl"
+    assert step_res["file_size_bytes"] > 0
+
+    # Safe close after save + re-open
+    closed_docs: list[str] = []
+    fc.closeDocument = lambda name: (closed_docs.append(name), fc.listDocuments().pop(name, None))
+    close_res = document.close_document()
+    assert close_res["closed"] is True
+    assert closed_docs == ["CoursePart"]
+
+    real_fcstd = tmp_path / "demo_part.FCStd"
+    real_fcstd.write_bytes(b"zip")
+    fc.openDocument = lambda p: fc.newDocument("CoursePart")
+    opened = document.open_document(str(real_fcstd))
+    assert opened["opened"] is True
+    assert opened["name"] == "CoursePart"
