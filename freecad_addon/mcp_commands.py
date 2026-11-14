@@ -67,10 +67,45 @@ def _reload_handlers() -> dict:
 def _set_status_bar(text: str) -> None:
     try:
         mw = Gui.getMainWindow()
-        if mw is not None:
-            mw.showMessage(text, 5000)
+        if mw is not None and hasattr(mw, "statusBar") and mw.statusBar() is not None:
+            mw.statusBar().showMessage(text, 5000)
     except Exception:
         pass
+
+
+_PREF_GROUP = "User parameter:BaseApp/Preferences/Mod/FreeCADTutorMCP"
+
+
+def get_autostart_pref() -> bool:
+    """Read AutoStart preference. Defaults to True for zero-friction student use."""
+    return FreeCAD.ParamGet(_PREF_GROUP).GetBool("AutoStart", True)
+
+
+def set_autostart_pref(value: bool) -> None:
+    FreeCAD.ParamGet(_PREF_GROUP).SetBool("AutoStart", value)
+
+
+def should_autostart() -> bool:
+    if os.environ.get("FREECAD_MCP_NO_AUTOSTART", "").strip() == "1":
+        return False
+    if os.environ.get("FREECAD_MCP_AUTOSTART", "").strip() == "1":
+        return True
+    return get_autostart_pref()
+
+
+def schedule_autostart() -> None:
+    """Schedule RPC auto-start after FreeCAD finishes GUI initialization."""
+    if not should_autostart():
+        return
+    try:
+        from PySide import QtCore
+    except ImportError:
+        try:
+            from PySide6 import QtCore
+        except ImportError:
+            from PySide2 import QtCore
+
+    QtCore.QTimer.singleShot(1000, lambda: ensure_started(silent_if_running=True))
 
 
 def ensure_started(silent_if_running: bool = False) -> RPCServer | None:
@@ -149,5 +184,28 @@ class StopTutorServerCommand:
         return _server is not None and _server.is_running
 
 
+class ToggleTutorAutoStart:
+    """Toggle whether the Tutor MCP RPC server auto-starts on FreeCAD launch."""
+
+    def GetResources(self):
+        on = get_autostart_pref()
+        return {
+            "MenuText": "Auto-Start Tutor Server [ON]" if on else "Auto-Start Tutor Server [OFF]",
+            "ToolTip": "Toggle automatic startup of the FreeCAD Tutor MCP RPC server",
+        }
+
+    def Activated(self):
+        new_val = not get_autostart_pref()
+        set_autostart_pref(new_val)
+        state = "ON" if new_val else "OFF"
+        FreeCAD.Console.PrintMessage(
+            f"FreeCAD Tutor MCP: Auto-start is now {state} (takes effect on next FreeCAD launch)\n"
+        )
+
+    def IsActive(self):
+        return True
+
+
 Gui.addCommand("StartTutorServer", StartTutorServerCommand())
 Gui.addCommand("StopTutorServer", StopTutorServerCommand())
+Gui.addCommand("ToggleTutorAutoStart", ToggleTutorAutoStart())

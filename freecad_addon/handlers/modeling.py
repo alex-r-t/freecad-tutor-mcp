@@ -283,7 +283,11 @@ def pad_sketch(
         pad = body.newObject("PartDesign::Pad", name or "Pad")
         pad.Profile = sketch
         pad.Length = float(length)
-        pad.Midplane = bool(symmetric)
+        # FreeCAD 1.1+ replaces Pad.Midplane with SideType ('One side' / 'Symmetric').
+        if hasattr(pad, "SideType"):
+            pad.SideType = "Symmetric" if symmetric else "One side"
+        else:
+            pad.Midplane = bool(symmetric)
         pad.Reversed = bool(reversed)
         doc.recompute()
         _verify_object_valid(pad, "Pad")
@@ -478,18 +482,63 @@ def _edge_dressup(
 # ── TechDraw ─────────────────────────────────────────────────────────────
 
 def _resolve_techdraw_template(template_name: str) -> str:
-    """Locate a TechDraw SVG template inside FreeCAD's resource directory."""
+    """Locate a TechDraw SVG template inside FreeCAD's resource directory (1.0 & 1.1+ layouts)."""
     filename = template_name if template_name.endswith(".svg") else f"{template_name}.svg"
+    stem = filename[:-4]
     res_dir = FreeCAD.getResourceDir()
-    candidates = [
-        os.path.join(res_dir, "Mod", "TechDraw", "Templates", filename),
-        os.path.join(res_dir, "share", "Mod", "TechDraw", "Templates", filename),
+    tpl_roots = [
+        os.path.join(res_dir, "Mod", "TechDraw", "Templates"),
+        os.path.join(res_dir, "share", "Mod", "TechDraw", "Templates"),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+
+    # FreeCAD 1.1 reorganized Templates/ into Default_Template_*.svg + ISO/ and ANSI/ subdirs.
+    alias_filenames = [filename]
+    if stem.lower() in ("a4_landscape", "default_a4_landscape"):
+        alias_filenames.extend([
+            "Default_Template_A4_Landscape.svg",
+            "A4_Landscape_TD.svg",
+            "A4_Landscape_blank.svg",
+        ])
+    elif stem.lower() in ("a4_portrait", "a3_landscape", "usletter_landscape"):
+        alias_filenames.extend([
+            f"Default_Template_{stem}.svg",
+            f"{stem}_TD.svg",
+            f"{stem}_blank.svg",
+        ])
+
+    for root in tpl_roots:
+        for candidate_name in alias_filenames:
+            direct = os.path.join(root, candidate_name)
+            if os.path.exists(direct):
+                return direct
+
+    # Recursive fallback scan inside Templates/ (preferring non-localized paths first).
+    target_names_lower = [name.lower() for name in alias_filenames]
+    for root in tpl_roots:
+        if not os.path.isdir(root):
+            continue
+        non_local: list[str] = []
+        localized: list[str] = []
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fname in filenames:
+                if not fname.lower().endswith(".svg"):
+                    continue
+                full = os.path.join(dirpath, fname)
+                if "localized" in dirpath.lower():
+                    localized.append(full)
+                else:
+                    non_local.append(full)
+        for pool in (non_local, localized):
+            for wanted in target_names_lower:
+                for full in pool:
+                    if os.path.basename(full).lower() == wanted:
+                        return full
+            for full in pool:
+                if stem.lower() in os.path.basename(full).lower():
+                    return full
+
     raise FileNotFoundError(
-        f"TechDraw template '{filename}' not found under {res_dir}. Checked: {candidates}"
+        f"TechDraw template '{filename}' not found under {tpl_roots}."
     )
 
 
