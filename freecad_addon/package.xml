@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>FreeCAD Tutor MCP</name>
+  <description>MCP workbench bridge for AI-assisted FreeCAD learning, diagnostics, UI discovery, and safe demonstrations.</description>
+  <version>0.1.0</version>
+  <date>2026-11-13</date>
+  <license file="LICENSE">LGPL-2.1-or-later</license>
+  <content>
+    <workbench>
+      <classname>FreeCADTutorMCPWorkbench</classname>
+    </workbench>
+  </content>
+</package>
