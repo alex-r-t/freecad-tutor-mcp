@@ -68,3 +68,28 @@ For live FreeCAD verification (once FreeCAD 1.0/1.1+ is installed):
 freecadcmd.exe -c "import sys; sys.argv=['live_smoke.py','--headless']; exec(open('tests/live_smoke.py').read(), {'__name__':'__main__'})"
 uv run python tests/live_smoke.py --gui
 ```
+
+---
+
+## Credits & Inspirations
+
+`FreeCAD Tutor MCP` was built from scratch for student tutoring by combining architectural ideas, safety patterns, and FreeCAD API lessons from several open-source FreeCAD MCP projects and FreeCAD itself:
+
+* **[theosib/FreeCAD-MCP-Server](https://github.com/theosib/FreeCAD-MCP-Server)** *(Timothy Miller, `LGPL-2.1-or-later`)* — Inspired the dual-process TCP JSON-RPC 2.0 addon/bridge architecture (`127.0.0.1:9876`, newline-delimited framing), workbench loader pattern, and deep runtime diagnostic tools (`list_documents`, `get_document_graph`, `inspect_object`, `analyze_shape`, `get_sketch_diagnostics`, `tracked_recompute`, `execute_script`).
+* **[neka-nat/freecad-mcp](https://github.com/neka-nat/freecad-mcp)** *(Shirokuma / k tanaka, `MIT`)* — Inspired the hardened Qt main-thread GUI dispatcher (`rpc_server.py`: per-call response queues, `QueuedConnection` wakeups, bounded drag deferral) and the crash-safe `Gui.activeView()` / `saveImage` viewport guard (`get_view` TechDraw-tab safety).
+* **[spkane/freecad-addon-robust-mcp-server](https://github.com/spkane/freecad-addon-robust-mcp-server)** *(Sean P. Kane and contributors, `Apache-2.0 AND MIT`)* — Inspired GUI context and safety tooling (`get_selection` / `set_selection`, `list_workbenches` / `activate_workbench`, Report view `QTextEdit` capture in `get_console_output`, `undo` / `redo` transaction wrappers), FreeCAD 1.x `AttachmentSupport` compatibility handling, and local token authentication for the bridge.
+* **[sergiudanstan/freecad-mcp](https://github.com/sergiudanstan/freecad-mcp)** *(Dan Stan, `MIT`)* — Inspired `TechDraw` 2D drawing and template patterns (`create_techdraw_page`, `add_techdraw_view`, `add_techdraw_dimension`, `add_techdraw_section`, `export_techdraw_page`) and broad `Part` / `PartDesign` / `Sketcher` tool coverage.
+* **[FreeCAD/FreeCAD](https://github.com/FreeCAD/FreeCAD)** *(`LGPL-2.1-or-later`)* — Upstream FreeCAD 1.1 source tree referenced for Python/C++ APIs (`SketchObjectPyImp.cpp`, `DocumentObjectPyImp.cpp`, `FeaturePad.cpp`, `FeaturePocket.cpp`, `PartDesign::Plane`, `App::VarSet`, and `TechDrawGui`).
+
+Other FreeCAD MCP ecosystem repositories surveyed during initial architecture research:
+* **[contextform/freecad-mcp](https://github.com/contextform/freecad-mcp)**
+* **[bonninr/freecad_mcp](https://github.com/bonninr/freecad_mcp)** *(Rodolfo Bonnin, `MIT`)*
+* **[YunchaoYang/robust-freecad-mcp](https://github.com/YunchaoYang/robust-freecad-mcp)**
+
+See [`NOTICE`](NOTICE) for detailed component-level attributions.
+
+---
+
+## License
+
+`FreeCAD Tutor MCP` is distributed under **`LGPL-2.1-or-later`**. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

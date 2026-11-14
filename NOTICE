@@ -1,0 +1,65 @@
+FreeCAD Tutor MCP
+Copyright (c) 2026 alex-r-t
+
+This project is distributed under the GNU Lesser General Public License v2.1 or later
+(LGPL-2.1-or-later). See the LICENSE file for the full license text.
+
+--------------------------------------------------------------------------------
+THIRD-PARTY INSPIRATIONS AND ATTRIBUTIONS
+--------------------------------------------------------------------------------
+
+While FreeCAD Tutor MCP is an independent implementation tailored for tutoring
+with FreeCAD 1.0/1.1+ and Claude Desktop on Windows, its design and several
+engineering patterns were directly inspired by the following open-source projects:
+
+1. theosib/FreeCAD-MCP-Server
+   URL:     https://github.com/theosib/FreeCAD-MCP-Server
+   Author:  Timothy Miller
+   License: LGPL-2.1-or-later
+   Notes:   Inspired the FreeCAD workbench addon + stdio MCP bridge split,
+            newline-delimited TCP JSON-RPC 2.0 framing, and deep inspection
+            toolset (list_documents, get_document_graph, inspect_object,
+            analyze_shape, get_sketch_diagnostics, tracked_recompute,
+            execute_script).
+
+2. neka-nat/freecad-mcp
+   URL:     https://github.com/neka-nat/freecad-mcp
+   Author:  Shirokuma (k tanaka)
+   License: MIT
+   Notes:   Inspired the hardened Qt main-thread GUI dispatch patterns in
+            freecad_addon/rpc_server.py (modeled after gui_dispatch.py:
+            per-call response queues, QueuedConnection wake signals, bounded
+            mouse-drag deferral) and the crash-safe Gui.activeView() /
+            saveImage guard in freecad_addon/handlers/viewport.py (modeled
+            after view_manager.py).
+
+3. spkane/freecad-addon-robust-mcp-server
+   URL:     https://github.com/spkane/freecad-addon-robust-mcp-server
+   Author:  Sean P. Kane and contributors
+   License: Apache-2.0 AND MIT
+   Notes:   Inspired selection and workbench controls (get_selection,
+            set_selection, list_workbenches, activate_workbench), Report view
+            console capture (get_console_output), FreeCAD undo transaction
+            wrappers (undo, redo, get_undo_redo_status), FreeCAD 1.x
+            AttachmentSupport compatibility handling, and shared-token local
+            RPC authentication.
+
+4. sergiudanstan/freecad-mcp
+   URL:     https://github.com/sergiudanstan/freecad-mcp
+   Author:  Dan Stan
+   License: MIT
+   Notes:   Inspired TechDraw drawing creation/export workflows and broad
+            Part / PartDesign / Sketcher modeling coverage.
+
+5. FreeCAD/FreeCAD
+   URL:     https://github.com/FreeCAD/FreeCAD
+   License: LGPL-2.1-or-later
+   Notes:   Upstream FreeCAD 1.1 source tree referenced for C++/Python runtime
+            APIs (SketchObjectPyImp.cpp, DocumentObjectPyImp.cpp,
+            FeaturePad.cpp, FeaturePocket.cpp, PartDesign::Plane, App::VarSet,
+            and TechDrawGui).
+
+6. Additional Ecosystem Repositories Surveyed During Research
+   - contextform/freecad-mcp (https://github.com/contextform/freecad-mcp)
+   - bonninr/freecad_mcp (https://github.com/bonninr/freecad_mcp, MIT, Rodolfo Bonnin)
+   - YunchaoYang/robust-freecad-mcp (https://github.com/YunchaoYang/robust-freecad-mcp)
